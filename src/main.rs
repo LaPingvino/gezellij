@@ -1,4 +1,5 @@
 mod commands;
+mod service_commands;
 #[cfg(test)]
 mod tests;
 
@@ -27,6 +28,10 @@ fn main() {
         }
         if let Some(Command::Subscribe(subscribe_cli)) = opts.command {
             commands::subscribe_to_session(subscribe_cli, opts.session, config);
+            std::process::exit(0);
+        }
+        if let Some(Command::Service(service_command)) = opts.command.clone() {
+            service_commands::run_service_command(opts, service_command);
             std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::Run {

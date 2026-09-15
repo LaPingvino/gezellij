@@ -14,7 +14,7 @@ use crate::{
     data::{Direction, LayoutInfo, LayoutMetadata, LayoutParsingError, LayoutWithError},
     home::{default_layout_dir, find_default_config_dir},
     input::{
-        command::RunCommand,
+        command::{RestartPolicy, RunCommand},
         config::{Config, ConfigError},
     },
     pane_size::{Constraint, Dimension, PaneGeom},
@@ -375,6 +375,14 @@ impl Run {
         if let Some(start_suspended) = start_suspended {
             if let Run::Command(run_command) = self {
                 run_command.hold_on_start = start_suspended;
+            }
+        }
+    }
+    pub fn add_restart(&mut self, restart: Option<RestartPolicy>) {
+        // Gezellij: overrides the restart policy of a Run::Command if it is Some
+        if let Some(restart) = restart {
+            if let Run::Command(run_command) = self {
+                run_command.restart = restart;
             }
         }
     }

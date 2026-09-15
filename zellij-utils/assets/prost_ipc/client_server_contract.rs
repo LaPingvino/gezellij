@@ -1604,6 +1604,9 @@ pub struct RunCommandAction {
     /// Added missing use_terminal_title field
     #[prost(bool, tag="8")]
     pub use_terminal_title: bool,
+    /// Gezellij: supervision policy (absent = no)
+    #[prost(enumeration="RestartPolicy", optional, tag="9")]
+    pub restart: ::core::option::Option<i32>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2679,6 +2682,36 @@ impl ExitReason {
             "EXIT_REASON_ERROR" => Some(Self::Error),
             "EXIT_REASON_CUSTOM_EXIT_STATUS" => Some(Self::CustomExitStatus),
             "EXIT_REASON_KICKED_BY_HOST" => Some(Self::KickedByHost),
+            _ => None,
+        }
+    }
+}
+/// Gezellij: what to do when a command pane's process exits
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RestartPolicy {
+    RestartNo = 0,
+    RestartOnFailure = 1,
+    RestartAlways = 2,
+}
+impl RestartPolicy {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            RestartPolicy::RestartNo => "RESTART_NO",
+            RestartPolicy::RestartOnFailure => "RESTART_ON_FAILURE",
+            RestartPolicy::RestartAlways => "RESTART_ALWAYS",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RESTART_NO" => Some(Self::RestartNo),
+            "RESTART_ON_FAILURE" => Some(Self::RestartOnFailure),
+            "RESTART_ALWAYS" => Some(Self::RestartAlways),
             _ => None,
         }
     }

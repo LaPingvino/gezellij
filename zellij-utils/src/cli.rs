@@ -3,6 +3,7 @@ use crate::setup::Setup;
 use crate::{
     consts::{ZELLIJ_CONFIG_DIR_ENV, ZELLIJ_CONFIG_FILE_ENV},
     input::{
+        command::RestartPolicy,
         layout::PluginUserConfiguration,
         options::{Options, PaneFrameStyle},
     },
@@ -154,6 +155,100 @@ pub enum Command {
         "zellij [--session <OTHER SESSION NAME>] subscribe [OPTIONS] --pane-id..."
     ))]
     Subscribe(SubscribeCli),
+
+    /// Gezellij: manage supervised background services (host-native, no container needed)
+    #[clap(name = "service", visible_alias = "svc")]
+    #[clap(subcommand)]
+    Service(ServiceCommand),
+}
+
+/// Gezellij service management: a service is a detached session that runs one supervised
+/// command with a restart policy. Definitions persist in `<config dir>/services/<name>.json`.
+#[derive(Debug, Subcommand, Clone, Serialize, Deserialize)]
+pub enum ServiceCommand {
+    /// Define a new service (and start it, unless --no-start is given)
+    Add {
+        /// Service name (letters, digits, '-', '_' and '.')
+        #[clap(short, long, value_parser)]
+        name: String,
+
+        /// Restart policy applied when the command exits
+        #[clap(short, long, value_enum, default_value_t = RestartPolicy::OnFailure)]
+        restart: RestartPolicy,
+
+        /// Working directory for the command (defaults to the current directory)
+        #[clap(long, value_parser)]
+        cwd: Option<PathBuf>,
+
+        /// Only save the definition, do not start the service now
+        #[clap(long)]
+        no_start: bool,
+
+        /// Overwrite an existing definition with the same name
+        #[clap(short, long)]
+        force: bool,
+
+        /// The command to supervise
+        #[clap(last(true), required(true))]
+        command: Vec<String>,
+    },
+    /// Start a defined service in the background (idempotent)
+    Start {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
+    },
+    /// Stop a running service (kills its session, keeps the definition)
+    Stop {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
+    },
+    /// Stop a service and delete its definition
+    #[clap(visible_alias = "rm")]
+    Remove {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
+    },
+    /// List defined services and whether they are running
+    #[clap(visible_alias = "ls")]
+    List {
+        /// Do not add colors and formatting to the list (useful for parsing)
+        #[clap(short, long)]
+        no_formatting: bool,
+    },
+    /// Attach a terminal to a running service (detach with the usual keybinding)
+    #[clap(visible_alias = "a")]
+    Attach {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
+    },
+    /// Show the service's output (its pane scrollback)
+    Logs {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
+
+        /// Only show the last N lines
+        #[clap(short, long, value_parser)]
+        tail: Option<usize>,
+
+        /// Keep streaming new output until interrupted
+        #[clap(short, long)]
+        follow: bool,
+    },
+    /// Emit a `systemd --user` unit so the service starts at login
+    ExportSystemd {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
+
+        /// Write the unit into ~/.config/systemd/user/ instead of printing it
+        #[clap(long)]
+        install: bool,
+    },
 }
 
 #[derive(Debug, Parser, Clone, Serialize, Deserialize)]
@@ -381,6 +476,10 @@ pub enum Sessions {
         /// Start the initial command suspended, only running it after you first press ENTER
         #[clap(long, requires("initial_command"))]
         start_suspended: bool,
+
+        /// Gezellij: restart policy for the initial command (no, on-failure, always)
+        #[clap(long, value_enum, requires("initial_command"))]
+        restart: Option<RestartPolicy>,
     },
 
     /// Watch a session (read-only)

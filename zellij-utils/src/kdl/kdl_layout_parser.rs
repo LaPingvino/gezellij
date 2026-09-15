@@ -1,5 +1,5 @@
 use crate::input::{
-    command::RunCommand,
+    command::{RestartPolicy, RunCommand},
     config::ConfigError,
     layout::{
         FloatingPaneLayout, Layout, LayoutConstraint, PercentOrFixed, PluginUserConfiguration, Run,
@@ -76,6 +76,7 @@ impl<'a> KdlLayoutParser<'a> {
             || word == "args"
             || word == "close_on_exit"
             || word == "start_suspended"
+            || word == "restart"
             || word == "borderless"
             || word == "focus"
             || word == "name"
@@ -99,6 +100,7 @@ impl<'a> KdlLayoutParser<'a> {
             || property_name == "args"
             || property_name == "close_on_exit"
             || property_name == "start_suspended"
+            || property_name == "restart"
             || property_name == "split_direction"
             || property_name == "pane"
             || property_name == "children"
@@ -120,6 +122,7 @@ impl<'a> KdlLayoutParser<'a> {
             || property_name == "args"
             || property_name == "close_on_exit"
             || property_name == "start_suspended"
+            || property_name == "restart"
             || property_name == "x"
             || property_name == "y"
             || property_name == "width"
@@ -428,6 +431,16 @@ impl<'a> KdlLayoutParser<'a> {
             None => Ok(None),
         }
     }
+    /// Gezellij: parse the optional `restart` pane property ("no" | "on-failure" | "always")
+    fn parse_restart(&self, kdl_node: &KdlNode) -> Result<Option<RestartPolicy>, ConfigError> {
+        match kdl_get_string_property_or_child_value_with_error!(kdl_node, "restart") {
+            Some(restart) => match RestartPolicy::from_str(restart) {
+                Ok(restart) => Ok(Some(restart)),
+                Err(e) => Err(kdl_parsing_error!(e, kdl_node)),
+            },
+            None => Ok(None),
+        }
+    }
     fn parse_pane_command(
         &self,
         pane_node: &KdlNode,
@@ -441,6 +454,7 @@ impl<'a> KdlLayoutParser<'a> {
             kdl_get_bool_property_or_child_value_with_error!(pane_node, "close_on_exit");
         let start_suspended =
             kdl_get_bool_property_or_child_value_with_error!(pane_node, "start_suspended");
+        let restart = self.parse_restart(pane_node)?;
         if !is_template {
             self.assert_no_bare_attributes_in_pane_node(
                 &command,
@@ -460,6 +474,7 @@ impl<'a> KdlLayoutParser<'a> {
                 cwd,
                 hold_on_close,
                 hold_on_start,
+                restart: restart.unwrap_or_default(),
                 ..Default::default()
             }))),
             (None, Some(edit), Some(cwd)) => {
@@ -733,6 +748,7 @@ impl<'a> KdlLayoutParser<'a> {
                     kdl_get_bool_property_or_child_value_with_error!(kdl_node, "close_on_exit");
                 let start_suspended =
                     kdl_get_bool_property_or_child_value_with_error!(kdl_node, "start_suspended");
+                let restart = self.parse_restart(kdl_node)?;
                 let split_size = self.parse_split_size(kdl_node)?;
                 let run = self.parse_command_plugin_or_edit_block_for_template(kdl_node)?;
                 let exclude_from_sync =
@@ -763,6 +779,7 @@ impl<'a> KdlLayoutParser<'a> {
                     pane_template_run_command.add_args(args);
                     pane_template_run_command.add_close_on_exit(close_on_exit);
                     pane_template_run_command.add_start_suspended(start_suspended);
+                    pane_template_run_command.add_restart(restart);
                 };
                 if let Some(borderless) = borderless {
                     pane_template.borderless = Some(borderless);
@@ -839,6 +856,7 @@ impl<'a> KdlLayoutParser<'a> {
                     kdl_get_bool_property_or_child_value_with_error!(kdl_node, "close_on_exit");
                 let start_suspended =
                     kdl_get_bool_property_or_child_value_with_error!(kdl_node, "start_suspended");
+                let restart = self.parse_restart(kdl_node)?;
                 let run = self.parse_command_plugin_or_edit_block_for_template(kdl_node)?;
                 self.assert_no_bare_attributes_in_pane_node_with_template(
                     &run,
@@ -855,6 +873,7 @@ impl<'a> KdlLayoutParser<'a> {
                     pane_template_run_command.add_args(args);
                     pane_template_run_command.add_close_on_exit(close_on_exit);
                     pane_template_run_command.add_start_suspended(start_suspended);
+                    pane_template_run_command.add_restart(restart);
                 };
                 if let Some(focus) = focus {
                     pane_template.focus = Some(focus);
@@ -893,6 +912,7 @@ impl<'a> KdlLayoutParser<'a> {
                     kdl_get_bool_property_or_child_value_with_error!(kdl_node, "close_on_exit");
                 let start_suspended =
                     kdl_get_bool_property_or_child_value_with_error!(kdl_node, "start_suspended");
+                let restart = self.parse_restart(kdl_node)?;
                 let run = self.parse_command_plugin_or_edit_block_for_template(kdl_node)?;
                 self.assert_no_bare_attributes_in_pane_node_with_template(
                     &run,
@@ -909,6 +929,7 @@ impl<'a> KdlLayoutParser<'a> {
                     pane_template_run_command.add_args(args);
                     pane_template_run_command.add_close_on_exit(close_on_exit);
                     pane_template_run_command.add_start_suspended(start_suspended);
+                    pane_template_run_command.add_restart(restart);
                 };
                 if let Some(focus) = focus {
                     pane_template.focus = Some(focus);

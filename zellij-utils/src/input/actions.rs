@@ -1,6 +1,6 @@
 //! Definition of the actions that can be bound to keys.
 
-pub use super::command::{OpenFilePayload, RunCommandAction};
+pub use super::command::{OpenFilePayload, RestartPolicy, RunCommandAction};
 use super::layout::{
     FloatingPaneLayout, Layout, PluginAlias, RunPlugin, RunPluginLocation, RunPluginOrAlias,
     SwapFloatingLayout, SwapTiledLayout, TabLayoutInfo, TiledPaneLayout,
@@ -32,6 +32,7 @@ pub fn initial_panes_from_cli(
     caller_cwd: PathBuf,
     close_on_exit: bool,
     start_suspended: bool,
+    restart: RestartPolicy,
 ) -> Option<Vec<CommandOrPlugin>> {
     if let Some(plugin_url) = initial_plugin {
         let plugin = match RunPluginLocation::parse(&plugin_url, cwd.clone()) {
@@ -61,6 +62,7 @@ pub fn initial_panes_from_cli(
             direction: None,
             hold_on_close: !close_on_exit,
             hold_on_start: start_suspended,
+            restart,
             ..Default::default()
         };
         Some(vec![CommandOrPlugin::Command(run_command_action)])
@@ -1529,6 +1531,7 @@ impl Action {
                     current_dir.clone(),
                     close_on_exit,
                     start_suspended,
+                    RestartPolicy::No,
                 );
                 if let Some(raw_layout) = layout_string {
                     let layout_source_name = "layout-string".to_owned();

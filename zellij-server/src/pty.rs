@@ -23,7 +23,7 @@ use zellij_utils::{
     errors::prelude::*,
     errors::{ContextType, PtyContext},
     input::{
-        command::{OpenFilePayload, RunCommand, TerminalAction},
+        command::{OpenFilePayload, RestartPolicy, RunCommand, TerminalAction},
         layout::{
             FloatingPaneLayout, Layout, Run, RunPluginOrAlias, SwapFloatingLayout, SwapTiledLayout,
             TabLayoutInfo, TiledPaneLayout,
@@ -209,6 +209,52 @@ pub(crate) struct Pty {
     pane_activity_flags: HashMap<u32, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     terminal_cmds: HashMap<u32, Vec<String>>,
     terminal_foreground_cmds: HashMap<u32, Vec<String>>,
+    /// Gezellij: per-terminal supervision state for command panes with a restart policy
+    restart_tracker: RestartTracker,
+}
+
+/// Gezellij: supervision bookkeeping for command panes that carry a [`RestartPolicy`].
+#[derive(Debug, Clone)]
+struct RestartState {
+    /// consecutive short-lived runs, drives the exponential backoff
+    attempts: u32,
+    /// when the current (or most recent) run of the command was started
+    started_at: std::time::Instant,
+    /// bumped on every (re)start so a stale restart timer can recognise itself and stand down
+    generation: u64,
+}
+
+type RestartTracker = Arc<std::sync::Mutex<HashMap<u32, RestartState>>>;
+
+const RESTART_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+const RESTART_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+/// a run at least this long counts as "stable": the backoff counter resets after it
+const RESTART_STABLE_RUN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Registers an exit of `terminal_id` and returns how long to wait before re-running it,
+/// together with the generation the timer must still observe for its restart to be valid.
+fn schedule_restart_delay(
+    tracker: &RestartTracker,
+    terminal_id: u32,
+) -> (std::time::Duration, u64) {
+    let mut tracker = match tracker.lock() {
+        Ok(tracker) => tracker,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let state = tracker.entry(terminal_id).or_insert(RestartState {
+        attempts: 0,
+        started_at: std::time::Instant::now(),
+        generation: 0,
+    });
+    if state.started_at.elapsed() >= RESTART_STABLE_RUN {
+        state.attempts = 0;
+    }
+    state.attempts = state.attempts.saturating_add(1);
+    let exponent = state.attempts.saturating_sub(1).min(16);
+    let delay = RESTART_BASE_DELAY
+        .saturating_mul(1u32 << exponent)
+        .min(RESTART_MAX_DELAY);
+    (delay, state.generation)
 }
 
 pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
@@ -921,6 +967,7 @@ impl Pty {
             task_handles: HashMap::new(),
             default_editor,
             originating_plugins: HashMap::new(),
+            restart_tracker: Default::default(),
             post_command_discovery_hook,
             plugin_cwds: HashMap::new(),
             terminal_cwds: HashMap::new(),
@@ -1017,6 +1064,116 @@ impl Pty {
             };
         };
     }
+    /// Gezellij: record that the command in `terminal_id` has (re)started, for supervision.
+    fn note_command_started(&self, terminal_id: u32) {
+        let mut tracker = match self.restart_tracker.lock() {
+            Ok(tracker) => tracker,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let state = tracker.entry(terminal_id).or_insert(RestartState {
+            attempts: 0,
+            started_at: std::time::Instant::now(),
+            generation: 0,
+        });
+        state.started_at = std::time::Instant::now();
+        state.generation = state.generation.wrapping_add(1);
+    }
+    /// Builds the callback that runs (on the reaper thread) when a command pane's process exits.
+    ///
+    /// Besides the classic Zellij behaviour (notify the originating plugin, then hold or close
+    /// the pane), this implements Gezellij supervision: if `restart` says so, the pane is held and
+    /// a timer is armed that asks the screen to re-run it - via the very same path the user's
+    /// ENTER key takes - after an exponential backoff.
+    fn command_exit_callback(
+        &self,
+        hold_on_close: bool,
+        restart: RestartPolicy,
+        originating_command_plugin: Option<OriginatingPlugin>,
+        originating_edit_plugin: Option<OriginatingPlugin>,
+    ) -> Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send> {
+        let senders = self.bus.senders.clone();
+        let restart_tracker = self.restart_tracker.clone();
+        Box::new(move |pane_id, exit_status, command| {
+            // if this command originated in a plugin, we send the plugin an event letting it
+            // know the command exited and some other useful information
+            if let PaneId::Terminal(terminal_id) = pane_id {
+                if let Some(originating_command_plugin) = originating_command_plugin.as_ref() {
+                    let update_event = Event::CommandPaneExited(
+                        terminal_id,
+                        exit_status,
+                        originating_command_plugin.context.clone(),
+                    );
+                    let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
+                        Some(originating_command_plugin.plugin_id),
+                        Some(originating_command_plugin.client_id),
+                        update_event,
+                    )]));
+                }
+                if let Some(originating_edit_plugin) = originating_edit_plugin.as_ref() {
+                    let update_event = Event::EditPaneExited(
+                        terminal_id,
+                        exit_status,
+                        originating_edit_plugin.context.clone(),
+                    );
+                    let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
+                        Some(originating_edit_plugin.plugin_id),
+                        Some(originating_edit_plugin.client_id),
+                        update_event,
+                    )]));
+                }
+            }
+
+            let scheduled_restart = match pane_id {
+                PaneId::Terminal(terminal_id) if restart.should_restart(exit_status) => Some((
+                    terminal_id,
+                    schedule_restart_delay(&restart_tracker, terminal_id),
+                )),
+                _ => None,
+            };
+
+            if hold_on_close || scheduled_restart.is_some() {
+                let _ = senders.send_to_screen(ScreenInstruction::HoldPane(
+                    pane_id,
+                    exit_status,
+                    command,
+                ));
+            } else {
+                let _ = senders.send_to_screen(ScreenInstruction::ClosePane(
+                    pane_id,
+                    None,
+                    None,
+                    exit_status,
+                ));
+            }
+
+            if let Some((terminal_id, (delay, generation))) = scheduled_restart {
+                log::info!(
+                    "supervised pane {} exited with status {:?}; restarting in {:?} (policy: {})",
+                    terminal_id,
+                    exit_status,
+                    delay,
+                    restart
+                );
+                let senders = senders.clone();
+                let tracker = restart_tracker.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    let is_still_current = tracker
+                        .lock()
+                        .map(|t| {
+                            t.get(&terminal_id)
+                                .map(|state| state.generation == generation)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if is_still_current {
+                        let _ = senders
+                            .send_to_screen(ScreenInstruction::RerunCommandPane(terminal_id, None));
+                    }
+                });
+            }
+        })
+    }
     pub fn spawn_terminal(
         &mut self,
         terminal_action: Option<TerminalAction>,
@@ -1073,56 +1230,16 @@ impl Pty {
             return Ok((terminal_id, starts_held));
         }
 
-        let originating_command_plugin = Arc::new(originating_command_plugin.clone());
-        let originating_edit_plugin = Arc::new(originating_edit_plugin.clone());
-        let quit_cb = Box::new({
-            let senders = self.bus.senders.clone();
-            move |pane_id, exit_status, command| {
-                // if this command originated in a plugin, we send the plugin an event letting it
-                // know the command exited and some other useful information
-                if let PaneId::Terminal(pane_id) = pane_id {
-                    if let Some(originating_command_plugin) = originating_command_plugin.as_ref() {
-                        let update_event = Event::CommandPaneExited(
-                            pane_id,
-                            exit_status,
-                            originating_command_plugin.context.clone(),
-                        );
-                        let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
-                            Some(originating_command_plugin.plugin_id),
-                            Some(originating_command_plugin.client_id),
-                            update_event,
-                        )]));
-                    }
-                    if let Some(originating_edit_plugin) = originating_edit_plugin.as_ref() {
-                        let update_event = Event::EditPaneExited(
-                            pane_id,
-                            exit_status,
-                            originating_edit_plugin.context.clone(),
-                        );
-                        let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
-                            Some(originating_edit_plugin.plugin_id),
-                            Some(originating_edit_plugin.client_id),
-                            update_event,
-                        )]));
-                    }
-                }
-
-                if hold_on_close {
-                    let _ = senders.send_to_screen(ScreenInstruction::HoldPane(
-                        pane_id,
-                        exit_status,
-                        command,
-                    ));
-                } else {
-                    let _ = senders.send_to_screen(ScreenInstruction::ClosePane(
-                        pane_id,
-                        None,
-                        None,
-                        exit_status,
-                    ));
-                }
-            }
-        });
+        let restart = match &terminal_action {
+            TerminalAction::RunCommand(run_command) => run_command.restart,
+            TerminalAction::OpenFile(_) => RestartPolicy::No,
+        };
+        let quit_cb = self.command_exit_callback(
+            hold_on_close,
+            restart,
+            originating_command_plugin,
+            originating_edit_plugin,
+        );
         let (terminal_id, reader, child_pid): (u32, Box<dyn AsyncReader>, Option<u32>) = self
             .bus
             .os_input
@@ -1148,6 +1265,7 @@ impl Pty {
             }
         });
 
+        self.note_command_started(terminal_id);
         self.task_handles.insert(terminal_id, terminal_bytes);
         self.pane_activity_flags.insert(terminal_id, activity_flag);
         if let Some(child_pid) = child_pid {
@@ -1613,41 +1731,12 @@ impl Pty {
         match run_instruction {
             Some(Run::Command(mut command)) => {
                 let starts_held = command.hold_on_start;
-                let hold_on_close = command.hold_on_close;
-                let quit_cb = Box::new({
-                    let senders = self.bus.senders.clone();
-                    move |pane_id, exit_status, command| {
-                        if let PaneId::Terminal(terminal_pane_id) = pane_id {
-                            if let Some(originating_plugin) = originating_plugin.as_ref() {
-                                let update_event = Event::CommandPaneExited(
-                                    terminal_pane_id,
-                                    exit_status,
-                                    originating_plugin.context.clone(),
-                                );
-                                let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
-                                    Some(originating_plugin.plugin_id),
-                                    Some(originating_plugin.client_id),
-                                    update_event,
-                                )]));
-                            }
-                        }
-
-                        if hold_on_close {
-                            let _ = senders.send_to_screen(ScreenInstruction::HoldPane(
-                                pane_id,
-                                exit_status,
-                                command,
-                            ));
-                        } else {
-                            let _ = senders.send_to_screen(ScreenInstruction::ClosePane(
-                                pane_id,
-                                None,
-                                None,
-                                exit_status,
-                            ));
-                        }
-                    }
-                });
+                let quit_cb = self.command_exit_callback(
+                    command.hold_on_close,
+                    command.restart,
+                    originating_plugin,
+                    None,
+                );
                 if command.cwd.is_none() {
                     if let TerminalAction::RunCommand(cmd) = default_shell {
                         command.cwd = cmd.cwd;
@@ -1689,6 +1778,7 @@ impl Pty {
                                 self.id_to_child_pid.insert(terminal_id, child_pid);
                                 self.capture_initial_cwd(terminal_id, child_pid);
                             }
+                            self.note_command_started(terminal_id);
                             Ok(Some((
                                 terminal_id,
                                 starts_held,
@@ -1820,6 +1910,9 @@ impl Pty {
                 self.terminal_cwds.remove(&id);
                 self.terminal_cmds.remove(&id);
                 self.terminal_foreground_cmds.remove(&id);
+                if let Ok(mut tracker) = self.restart_tracker.lock() {
+                    tracker.remove(&id);
+                }
                 self.bus
                     .os_input
                     .as_ref()
@@ -1862,41 +1955,13 @@ impl Pty {
                 let _ = self.task_handles.remove(&id); // if all is well, this shouldn't be here
                 let _ = self.id_to_child_pid.remove(&id); // if all is wlel, this shouldn't be here
 
-                let hold_on_close = run_command.hold_on_close;
-                let originating_plugin = Arc::new(run_command.originating_plugin.clone());
-                let quit_cb = Box::new({
-                    let senders = self.bus.senders.clone();
-                    move |pane_id, exit_status, command| {
-                        if let PaneId::Terminal(pane_id) = pane_id {
-                            if let Some(originating_plugin) = originating_plugin.as_ref() {
-                                let update_event = Event::CommandPaneExited(
-                                    pane_id,
-                                    exit_status,
-                                    originating_plugin.context.clone(),
-                                );
-                                let _ = senders.send_to_plugin(PluginInstruction::Update(vec![(
-                                    Some(originating_plugin.plugin_id),
-                                    Some(originating_plugin.client_id),
-                                    update_event,
-                                )]));
-                            }
-                        }
-                        if hold_on_close {
-                            let _ = senders.send_to_screen(ScreenInstruction::HoldPane(
-                                pane_id,
-                                exit_status,
-                                command,
-                            ));
-                        } else {
-                            let _ = senders.send_to_screen(ScreenInstruction::ClosePane(
-                                pane_id,
-                                None,
-                                None,
-                                exit_status,
-                            ));
-                        }
-                    }
-                });
+                let quit_cb = self.command_exit_callback(
+                    run_command.hold_on_close,
+                    run_command.restart,
+                    run_command.originating_plugin.clone(),
+                    None,
+                );
+                self.note_command_started(id);
                 let (reader, child_pid): (Box<dyn AsyncReader>, Option<u32>) = self
                     .bus
                     .os_input

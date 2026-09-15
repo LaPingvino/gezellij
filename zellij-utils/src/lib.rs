@@ -9,6 +9,7 @@ pub mod home;
 mod home_unix;
 #[cfg(windows)]
 mod home_windows;
+pub mod host_fabric;
 pub mod input;
 pub mod kdl;
 pub mod nested_session_contract;

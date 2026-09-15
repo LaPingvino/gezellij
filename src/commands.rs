@@ -668,6 +668,7 @@ pub(crate) fn start_client(opts: CliArgs) {
                     initial_command: vec![],
                     close_on_exit: false,
                     start_suspended: false,
+                    restart: None,
                 }));
             } else {
                 opts.command = None;
@@ -706,6 +707,7 @@ pub(crate) fn start_client(opts: CliArgs) {
             initial_command,
             close_on_exit,
             start_suspended,
+            restart,
         })) = opts.command.clone()
         {
             if let Some(remote_session_url) = session_name.as_ref().and_then(|s| {
@@ -822,6 +824,7 @@ pub(crate) fn start_client(opts: CliArgs) {
                     current_dir,
                     close_on_exit,
                     start_suspended,
+                    restart.unwrap_or_default(),
                 ) {
                     client.set_initial_panes(initial_panes);
                 }

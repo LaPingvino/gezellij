@@ -213,6 +213,7 @@ fn serialize_tiled_pane(
         let mut tiled_pane_node_children = KdlDocument::new();
         serialize_args(args, &mut tiled_pane_node_children);
         serialize_start_suspended(&command, &mut tiled_pane_node_children);
+        serialize_restart(&layout.run, &mut tiled_pane_node_children);
         serialize_plugin(plugin, plugin_config, &mut tiled_pane_node_children);
         if layout.children.is_empty() && layout.external_children_index.is_some() {
             tiled_pane_node_children
@@ -495,6 +496,19 @@ fn serialize_start_suspended(command: &Option<String>, pane_node_children: &mut 
     }
 }
 
+/// Gezellij: persist a non-default restart policy so a resurrected service keeps supervising
+fn serialize_restart(run: &Option<Run>, pane_node_children: &mut KdlDocument) {
+    if let Some(Run::Command(run_command)) = run {
+        if !run_command.restart.is_no() {
+            let mut restart_node = KdlNode::new("restart");
+            restart_node
+                .entries_mut()
+                .push(KdlEntry::new(run_command.restart.as_str()));
+            pane_node_children.nodes_mut().push(restart_node);
+        }
+    }
+}
+
 fn serialize_global_cwd(global_cwd: &Option<PathBuf>) -> Option<KdlNode> {
     global_cwd.as_ref().map(|cwd| {
         let mut node = KdlNode::new("cwd");
@@ -683,6 +697,7 @@ fn serialize_floating_pane(
             .push(KdlEntry::new_prop("default_bg", bg.to_owned()));
     }
     serialize_start_suspended(&command, &mut floating_pane_node_children);
+    serialize_restart(&layout.run, &mut floating_pane_node_children);
     serialize_floating_layout_attributes(&layout, &mut floating_pane_node_children);
     serialize_args(args, &mut floating_pane_node_children);
     serialize_plugin(plugin, plugin_config, &mut floating_pane_node_children);
@@ -2381,5 +2396,62 @@ mod tests {
             panic!("Constraint is nor a percent nor fixed");
         };
         dim
+    }
+
+    fn manifest_with_tiled_command_pane(
+        restart: crate::input::command::RestartPolicy,
+    ) -> GlobalLayoutManifest {
+        use crate::input::command::RunCommand;
+        let tab_layout_manifest = TabLayoutManifest {
+            tiled_panes: vec![PaneLayoutManifest {
+                run: Some(Run::Command(RunCommand {
+                    command: PathBuf::from("/bin/sleep"),
+                    args: vec!["10000".to_owned()],
+                    restart,
+                    ..Default::default()
+                })),
+                title: Some("my-only-pane".to_owned()),
+                geom: PaneGeom {
+                    x: 0,
+                    y: 0,
+                    rows: Dimension::fixed(10),
+                    cols: Dimension::fixed(10),
+                    stacked: None,
+                    is_pinned: false,
+                    logical_position: None,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        GlobalLayoutManifest {
+            tabs: vec![("Tab #1".to_owned(), tab_layout_manifest)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn can_serialize_restart_policy_of_a_tiled_command_pane() {
+        use crate::input::command::RestartPolicy;
+        let kdl =
+            serialize_session_layout(manifest_with_tiled_command_pane(RestartPolicy::OnFailure))
+                .unwrap();
+        assert!(
+            kdl.0.contains("restart \"on-failure\""),
+            "expected a restart node in the serialized layout, got:\n{}",
+            kdl.0
+        );
+    }
+
+    #[test]
+    fn does_not_serialize_default_restart_policy_of_a_tiled_command_pane() {
+        use crate::input::command::RestartPolicy;
+        let kdl =
+            serialize_session_layout(manifest_with_tiled_command_pane(RestartPolicy::No)).unwrap();
+        assert!(
+            !kdl.0.contains("restart"),
+            "expected no restart node in the serialized layout, got:\n{}",
+            kdl.0
+        );
     }
 }

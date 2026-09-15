@@ -944,6 +944,14 @@ message RunCommandAction {
   bool hold_on_start = 6;                              // Renumbered
   optional OriginatingPlugin originating_plugin = 7;   // Added missing originating_plugin field
   bool use_terminal_title = 8;                         // Added missing use_terminal_title field
+  optional RestartPolicy restart = 9;                  // Gezellij: supervision policy (absent = no)
+}
+
+// Gezellij: what to do when a command pane's process exits
+enum RestartPolicy {
+  RESTART_NO = 0;
+  RESTART_ON_FAILURE = 1;
+  RESTART_ALWAYS = 2;
 }
 
 message TiledPaneLayout {

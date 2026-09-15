@@ -97,10 +97,11 @@
 ## 4. Phased Implementation Roadmap
 
 ### Phase 1: Foundation & Service Mode Primitives
-- [ ] Add `gezellij service` CLI subcommand schema in `zellij-utils/src/cli.rs`.
-- [ ] Implement headless pane execution (spawning without requiring an active GUI/TUI client attached).
-- [ ] Implement basic process supervision / auto-restart logic (`restart = "always" | "on-failure" | "no"`).
-- [ ] Implement `systemd --user` unit generation helper (`gezellij service export-systemd <name>`).
+- [x] Add `gezellij service` CLI subcommand schema in `zellij-utils/src/cli.rs`. *(2026-09-16: `zellij service add|start|stop|remove|list|attach|logs|export-systemd`, glue in `src/service_commands.rs`, registry in `zellij-utils/src/host_fabric/services.rs`; see `GEZELLIJ_SERVICES.md`)*
+- [x] Implement headless pane execution (spawning without requiring an active GUI/TUI client attached). *(verified: `attach --create-background` runs without a controlling terminal; CLI actions on such a session must address panes explicitly since nothing is focused)*
+- [x] Implement basic process supervision / auto-restart logic (`restart = "always" | "on-failure" | "no"`). *(`RunCommand.restart` + `pty.rs::command_exit_callback`, exponential backoff, KDL `restart` property, `attach --restart`)*
+- [x] Implement `systemd --user` unit generation helper (`gezellij service export-systemd <name>`). *(`zellij-utils/src/host_fabric/systemd.rs`; `Type=oneshot` for now, see §5.3)*
+- [ ] Follow-ups: server `--foreground` mode for real systemd supervision; keep previous run's output visible in `service logs`; show services in the session-manager plugin.
 
 ### Phase 2: Cgroups v2 Process Freezing
 - [ ] Add cgroups v2 detection and freezer controller interface in `zellij-utils`.
@@ -126,7 +127,63 @@
 
 ---
 
-## 5. Agent Handoff Checklist
+## 5. Design Notes (added 2026-09-16, after implementing Phase 1)
+
+Three kinds of notes, deliberately kept apart: **decisions** Joop made, **findings** verified
+against the code while building Phase 1, and **open questions** that may just be a blind spot of
+the agent writing this.
+
+### 5.1 Decisions
+
+* **The idea behind it:** Zellij is the foundation because it looks nice and is great to work with.
+  The product is a host-native way to run and look after things on a server that is *lighter,
+  safer and easier than Docker*. Judge every feature by that, not by multiplexer purity.
+* **Live upgrades (Phase 3) are about keeping processes alive.** Terminal grid, scrollback and
+  WASM plugin state are not significant. Layout travels through the existing
+  `session-layout.kdl` resurrection file (which now also carries the restart policy), the new
+  server adopts the live PTY FDs instead of spawning fresh processes, scrollback is best-effort,
+  plugins simply restart. In short: *resurrection + FD adoption*.
+* Anything that needs root (loopback routes, cgroup delegation) is a documented one-time setup
+  step, never something the binary does on its own. Safer-than-Docker means no privileged daemon.
+
+### 5.2 Verified findings
+
+* A service really is "a detached session + a restart policy". `attach --create-background`
+  already ran headless (the server copes without a controlling terminal); the pane hold/rerun
+  machinery already existed. Supervision took one exit-callback helper in `pty.rs`
+  (`command_exit_callback`) that arms a backoff timer and re-runs through the same
+  `ScreenInstruction::RerunCommandPane` path the user's ENTER key uses, so manual and automatic
+  restarts cannot double-fire. Backoff: 1s doubling to a 30s cap, reset after a 60s stable run.
+* Adding a field to `RunCommand` touches ~40 struct literals and 36 insta snapshots. Hand-written
+  `Debug` impls that omit the default `restart` keep every upstream snapshot byte-identical.
+* The IPC contract needed a new optional proto field (`RunCommandAction.restart = 9`), regenerated
+  with `cargo xtask proto`; old clients simply omit it.
+* `ZELLIJ_SOCK_DIR` derives from `XDG_RUNTIME_DIR`, which `systemd --user` sets identically, so a
+  unit-started service is visible to the interactive shell. The exported unit is
+  `Type=oneshot` + `RemainAfterExit=yes` because the server double-forks; systemd therefore does
+  not notice if the session dies on its own.
+* Debug builds of the binary default to `plugins_from_target`, which needs the `wasm32-wasip1`
+  target; on a machine without it build with
+  `--no-default-features --features "vendored_curl,web_server_capability"`.
+
+### 5.3 Open questions (possibly the agent's blind spots)
+
+* **Server `--foreground` mode.** A small change that would let the unit be `Type=simple` with
+  `Restart=on-failure`, so systemd genuinely supervises the session. Feels like Phase 1.5, but the
+  double-fork may exist for reasons not yet understood.
+* **cgroup delegation.** Writing `cgroup.freeze` only works in a cgroup the user controls; under
+  `systemd --user` that likely means spawning the server through `systemd-run --user --scope` or a
+  unit with `Delegate=yes`. Needs a look at how the server is spawned before Phase 2.
+* **ULA loopback.** One root step (`ip -6 route add local fd00:2830::/64 dev lo`) should make the
+  whole prefix bindable without per-address `ip addr add`. Untested here.
+* **Layout-file compatibility across versions** is what "resurrection + FD adoption" leans on; it
+  is already designed to be readable across versions, but Phase 3 should add a test that pins it.
+* **Services in the UI.** The session-manager plugin could show `svc-*` sessions with a status
+  badge; cheap polish that fits "nice to live in".
+
+---
+
+## 6. Agent Handoff Checklist
 
 When picking up work on this repository:
 1. **Toolchain:** Rust 1.90+ (`cargo`, `rustc`).

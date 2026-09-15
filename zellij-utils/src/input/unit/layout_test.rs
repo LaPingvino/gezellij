@@ -2535,3 +2535,104 @@ fn tiled_pane_still_rejects_zero_percent() {
     let result = SplitSize::from_str("1%");
     assert!(result.is_ok());
 }
+
+// --- Gezellij: restart policy (supervision) parsing ---------------------------------------
+
+fn tiled_run_command(layout: &Layout) -> RunCommand {
+    match &layout.template.as_ref().unwrap().0.children[0].run {
+        Some(Run::Command(run_command)) => run_command.clone(),
+        other => panic!("expected a command pane, got: {:?}", other),
+    }
+}
+
+fn floating_run_command(layout: &Layout) -> RunCommand {
+    match &layout.template.as_ref().unwrap().1[0].run {
+        Some(Run::Command(run_command)) => run_command.clone(),
+        other => panic!("expected a floating command pane, got: {:?}", other),
+    }
+}
+
+#[test]
+fn restart_property_parsed_on_command_pane() {
+    let kdl_layout = r#"
+        layout {
+            pane command="tail" restart="always"
+        }
+    "#;
+    let layout = Layout::from_kdl(kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
+    let run_command = tiled_run_command(&layout);
+    assert_eq!(run_command.command, PathBuf::from("tail"));
+    assert_eq!(run_command.restart, RestartPolicy::Always);
+}
+
+#[test]
+fn restart_child_node_parsed_on_command_pane() {
+    let kdl_layout = r#"
+        layout {
+            pane command="tail" {
+                restart "on-failure"
+            }
+        }
+    "#;
+    let layout = Layout::from_kdl(kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
+    let run_command = tiled_run_command(&layout);
+    assert_eq!(run_command.command, PathBuf::from("tail"));
+    assert_eq!(run_command.restart, RestartPolicy::OnFailure);
+}
+
+#[test]
+fn restart_property_applies_through_pane_template() {
+    let kdl_layout = r#"
+        layout {
+            pane_template name="service" {
+                command "tail"
+            }
+            service restart="always"
+        }
+    "#;
+    let layout = Layout::from_kdl(kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
+    let run_command = tiled_run_command(&layout);
+    assert_eq!(run_command.command, PathBuf::from("tail"));
+    assert_eq!(run_command.restart, RestartPolicy::Always);
+}
+
+#[test]
+fn restart_property_defaults_to_no() {
+    let kdl_layout = r#"
+        layout {
+            pane command="tail"
+        }
+    "#;
+    let layout = Layout::from_kdl(kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
+    assert_eq!(tiled_run_command(&layout).restart, RestartPolicy::No);
+}
+
+#[test]
+fn invalid_restart_value_is_an_error() {
+    let kdl_layout = r#"
+        layout {
+            pane command="tail" restart="sometimes"
+        }
+    "#;
+    let layout = Layout::from_kdl(kdl_layout, Some("layout_file_name".into()), None, None);
+    assert!(
+        layout.is_err(),
+        "expected an invalid restart policy to be a config error, got: {:?}",
+        layout
+    );
+}
+
+#[test]
+fn restart_on_floating_pane() {
+    let kdl_layout = r#"
+        layout {
+            floating_panes {
+                pane command="tail" restart="on-failure"
+            }
+        }
+    "#;
+    let layout = Layout::from_kdl(kdl_layout, Some("layout_file_name".into()), None, None).unwrap();
+    let run_command = floating_run_command(&layout);
+    assert_eq!(run_command.command, PathBuf::from("tail"));
+    assert_eq!(run_command.restart, RestartPolicy::OnFailure);
+}

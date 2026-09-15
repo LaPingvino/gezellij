@@ -4052,7 +4052,29 @@ impl From<crate::input::command::RunCommandAction>
             hold_on_start: action.hold_on_start,
             originating_plugin: action.originating_plugin.map(|op| op.into()),
             use_terminal_title: action.use_terminal_title,
+            restart: restart_policy_to_proto_i32(action.restart),
         }
+    }
+}
+
+// Gezellij: RestartPolicy <-> proto
+fn restart_policy_to_proto_i32(restart: crate::input::command::RestartPolicy) -> Option<i32> {
+    use crate::client_server_contract::client_server_contract::RestartPolicy as ProtoRestartPolicy;
+    use crate::input::command::RestartPolicy;
+    match restart {
+        RestartPolicy::No => None,
+        RestartPolicy::OnFailure => Some(ProtoRestartPolicy::RestartOnFailure as i32),
+        RestartPolicy::Always => Some(ProtoRestartPolicy::RestartAlways as i32),
+    }
+}
+
+fn proto_i32_to_restart_policy(restart: Option<i32>) -> crate::input::command::RestartPolicy {
+    use crate::client_server_contract::client_server_contract::RestartPolicy as ProtoRestartPolicy;
+    use crate::input::command::RestartPolicy;
+    match restart.and_then(|r| ProtoRestartPolicy::try_from(r).ok()) {
+        Some(ProtoRestartPolicy::RestartOnFailure) => RestartPolicy::OnFailure,
+        Some(ProtoRestartPolicy::RestartAlways) => RestartPolicy::Always,
+        Some(ProtoRestartPolicy::RestartNo) | None => RestartPolicy::No,
     }
 }
 
@@ -4154,6 +4176,7 @@ impl From<crate::input::layout::Run>
                         hold_on_start: cmd.hold_on_start,
                         originating_plugin: cmd.originating_plugin.map(|op| op.into()),
                         use_terminal_title: cmd.use_terminal_title,
+                        restart: restart_policy_to_proto_i32(cmd.restart),
                     },
                 )),
             },
@@ -4539,6 +4562,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Run>
                         .map(|op| op.try_into())
                         .transpose()?,
                     use_terminal_title: cmd.use_terminal_title,
+                    restart: proto_i32_to_restart_policy(cmd.restart),
                 },
             )),
             RunType::EditFile(edit) => Ok(crate::input::layout::Run::EditFile(
@@ -4648,6 +4672,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::RunCommandAc
                 .map(|op| op.try_into())
                 .transpose()?,
             use_terminal_title: action.use_terminal_title,
+            restart: proto_i32_to_restart_policy(action.restart),
         })
     }
 }
