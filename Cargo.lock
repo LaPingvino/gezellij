@@ -5004,6 +5004,7 @@ dependencies = [
  "insta",
  "interprocess",
  "isahc",
+ "libc",
  "log",
  "miette 7.6.0",
  "names",
