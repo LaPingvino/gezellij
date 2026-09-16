@@ -1,4 +1,5 @@
 mod commands;
+mod freeze_commands;
 mod service_commands;
 #[cfg(test)]
 mod tests;
@@ -32,6 +33,14 @@ fn main() {
         }
         if let Some(Command::Service(service_command)) = opts.command.clone() {
             service_commands::run_service_command(opts, service_command);
+            std::process::exit(0);
+        }
+        if let Some(Command::Freeze(freeze_cli)) = opts.command.clone() {
+            freeze_commands::run(opts, freeze_cli, true);
+            std::process::exit(0);
+        }
+        if let Some(Command::Thaw(freeze_cli)) = opts.command.clone() {
+            freeze_commands::run(opts, freeze_cli, false);
             std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::Run {

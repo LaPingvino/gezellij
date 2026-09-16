@@ -166,6 +166,30 @@ pub enum Command {
     #[clap(name = "service", visible_alias = "svc")]
     #[clap(subcommand)]
     Service(ServiceCommand),
+
+    /// Gezellij: freeze a session's processes in place (cgroup v2 freezer: 0% CPU, memory kept,
+    /// instant thaw). No signals are sent; the programs never notice.
+    #[clap(name = "freeze")]
+    Freeze(FreezeCli),
+
+    /// Gezellij: resume a frozen session (or pane)
+    #[clap(name = "thaw")]
+    Thaw(FreezeCli),
+}
+
+#[derive(Debug, Parser, Clone, Serialize, Deserialize)]
+pub struct FreezeCli {
+    /// Session to act on (defaults to --session, $ZELLIJ_SESSION_NAME, or the only active session)
+    #[clap(value_parser)]
+    pub session_name: Option<String>,
+
+    /// Only this pane (e.g. terminal_3 or 3) instead of the whole session
+    #[clap(short, long, value_parser)]
+    pub pane_id: Option<String>,
+
+    /// Just report the freezer state of every pane, change nothing
+    #[clap(long)]
+    pub status: bool,
 }
 
 /// Gezellij service management: a service is a detached session that runs one supervised

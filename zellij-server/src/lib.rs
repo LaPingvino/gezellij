@@ -938,6 +938,11 @@ pub fn start_server_impl(
             move || {
                 drop(std::fs::remove_file(&socket_path));
                 let listener = ipc_bind(&socket_path).unwrap();
+                // Gezellij: let CLIs find this server's pid (upgrade awareness)
+                #[cfg(unix)]
+                if let Ok(session_name) = envs::get_session_name() {
+                    let _ = zellij_utils::host_fabric::upgrade::record_server_pid(&session_name);
+                }
                 // set the sticky bit to avoid the socket file being potentially cleaned up
                 // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html states that for XDG_RUNTIME_DIR:
                 // "To ensure that your files are not removed, they should have their access time timestamp modified at least once every 6 hours of monotonic time or the 'sticky' bit should be set on the file. "
@@ -2073,6 +2078,12 @@ pub fn start_server_impl(
     *session_data.write().unwrap() = None;
 
     drop(std::fs::remove_file(&socket_path));
+    #[cfg(unix)]
+    os_input_output_unix::cleanup_pane_cgroups();
+    #[cfg(unix)]
+    if let Ok(session_name) = envs::get_session_name() {
+        zellij_utils::host_fabric::upgrade::remove_server_pid_record(&session_name);
+    }
 }
 
 fn init_session(

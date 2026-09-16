@@ -16,6 +16,7 @@ use libc::{self, ioctl, TIOCSWINSZ};
 use signal_hook;
 use signal_hook::consts::*;
 
+use std::os::unix::ffi::OsStringExt;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -183,6 +184,45 @@ fn handle_command_exit(mut child: Child) -> Result<Option<i32>> {
     }
 }
 
+/// Gezellij: the per-session tree of pane cgroups, created once per server process. `None` when
+/// cgroup v2 delegation is unavailable (logged once); panes then run un-isolated as in upstream.
+fn pane_cgroups() -> &'static Option<zellij_utils::host_fabric::cgroups::PaneCgroups> {
+    use std::sync::OnceLock;
+    static PANE_CGROUPS: OnceLock<Option<zellij_utils::host_fabric::cgroups::PaneCgroups>> =
+        OnceLock::new();
+    PANE_CGROUPS.get_or_init(|| {
+        let session_name = match zellij_utils::envs::get_session_name() {
+            Ok(name) => name,
+            Err(_) => return None,
+        };
+        match zellij_utils::host_fabric::cgroups::PaneCgroups::create_for_session(&session_name) {
+            Ok(tree) => {
+                log::info!(
+                    "pane cgroups for this session live under {}",
+                    tree.root().display()
+                );
+                Some(tree)
+            },
+            Err(e) => {
+                log::warn!(
+                    "cgroup v2 delegation unavailable ({}); panes will not be freezable",
+                    e
+                );
+                None
+            },
+        }
+    })
+}
+
+/// Gezellij: thaw and remove this session's pane cgroups; called once when the server exits.
+pub fn cleanup_pane_cgroups() {
+    if let Some(tree) = pane_cgroups().as_ref() {
+        if let Ok(session_name) = zellij_utils::envs::get_session_name() {
+            tree.remove_all(&session_name);
+        }
+    }
+}
+
 fn handle_openpty(
     open_pty_res: OpenptyResult,
     cmd: RunCommand,
@@ -208,6 +248,21 @@ fn handle_openpty(
         .with_context(|| err_context(&cmd));
     }
 
+    // Gezellij: give the pane its own cgroup so it can be frozen/thawed as a unit. The child joins
+    // it in pre_exec (before exec, so every descendant inherits it); failure is non-fatal.
+    let cgroup_procs: Option<std::ffi::CString> =
+        pane_cgroups()
+            .as_ref()
+            .and_then(|tree| match tree.create_pane(terminal_id) {
+                Ok(procs_file) => {
+                    std::ffi::CString::new(procs_file.into_os_string().into_vec()).ok()
+                },
+                Err(e) => {
+                    log::warn!("could not create cgroup for pane {}: {}", terminal_id, e);
+                    None
+                },
+            });
+
     let mut child = unsafe {
         let cmd = cmd.clone();
         let command = &mut Command::new(cmd.command);
@@ -228,6 +283,10 @@ fn handle_openpty(
                 if libc::login_tty(pid_secondary) != 0 {
                     panic!("failed to set controlling terminal");
                 }
+                if let Some(cgroup_procs) = cgroup_procs.as_ref() {
+                    // best effort: an un-isolated pane is better than no pane
+                    let _ = zellij_utils::host_fabric::cgroups::join_cgroup_raw(cgroup_procs);
+                }
                 close_fds::close_open_fds(3, &[]);
                 Ok(())
             })
@@ -243,6 +302,11 @@ fn handle_openpty(
             .fatal();
         let _ = unistd::close(pid_secondary);
         quit_cb(PaneId::Terminal(terminal_id), exit_status, cmd);
+        // Gezellij: tidy the pane's cgroup once its process tree is gone (fails harmlessly if
+        // descendants linger; the session teardown sweeps those up)
+        if let Some(tree) = pane_cgroups().as_ref() {
+            let _ = tree.remove_pane(terminal_id);
+        }
     });
 
     Ok((pid_primary, child_id as RawFd))

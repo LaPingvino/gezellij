@@ -107,14 +107,15 @@
 - [x] Arch `PKGBUILD` (`packaging/arch`, installs `/usr/bin/gezellij` beside stock zellij) and reversible login takeover script (`packaging/login`).
 
 ### Phase 2: Cgroups v2 Process Freezing
-- [ ] Add cgroups v2 detection and freezer controller interface in `zellij-utils`.
-- [ ] Implement `gezellij freeze <session/pane>` (write `1` to `cgroup.freeze`).
-- [ ] Implement `gezellij thaw <session/pane>` (write `0` to `cgroup.freeze`).
-- [ ] Display frozen/active status indicators in the UI status bar / tab bar.
+- [x] Add cgroups v2 detection and freezer controller interface in `zellij-utils`. *(`host_fabric/cgroups.rs`; every terminal pane joins its own cgroup `<server cgroup>/gezellij-<session>/pane-<id>` in `pre_exec`; verified as a plain user under `systemd --user` delegation)*
+- [x] Implement `gezellij freeze <session/pane>` (write `1` to `cgroup.freeze`). *(`zellij freeze [session] [--pane-id]`, `--status`; talks to sysfs directly via the root recorded next to the session socket)*
+- [x] Implement `gezellij thaw <session/pane>` (write `0` to `cgroup.freeze`).
+- [ ] Display frozen/active status indicators in the UI status bar / tab bar. *(next: server polls `cgroup.events`; also `service freeze|thaw` sugar and auto-freeze of idle sessions — see `GEZELLIJ_FREEZE.md`)*
+- [x] Interim upgrade awareness: server records its pid beside the socket; `host_fabric/upgrade.rs` detects a replaced binary via `/proc/<pid>/exe … (deleted)` (surfacing in the CLI pending).
 
 ### Phase 3: SCM_RIGHTS PTY Handover & Live Server Upgrades
-- [ ] Implement Unix domain socket file descriptor passing (`sendmsg` with `SCM_RIGHTS`) using `nix::sys::socket`.
-- [ ] Define serialization protocol for open master PTY descriptors + terminal cursor/scrollback state.
+- [x] Implement Unix domain socket file descriptor passing (`sendmsg` with `SCM_RIGHTS`) using `nix::sys::socket`. *(`host_fabric/handover.rs`: chunked SCM_RIGHTS transfer, 13 tests incl. 300 fds; handover sockets live in `<sock dir>/handover/` so they never look like sessions)*
+- [x] Define serialization protocol for open master PTY descriptors + terminal cursor/scrollback state. *(`HandoverManifest` v1, JSON, forward-tolerant; per the decision in §5.1 scrollback is best-effort. Full design and risk list in `HANDOVER_DESIGN.md` — read it before 3.3: pane↔fd correlation needs a side-car keyed by terminal id, adopted children are not waitable, and systemd `KillMode` must change for `svc-*` sessions)*
 - [ ] Add server handover listener in `zellij-server`: allows a newly started server binary to claim active PTYs from a dying server.
 - [ ] Implement `gezellij upgrade-server` / `--replace-server` CLI action.
 
