@@ -11,6 +11,8 @@
 //!
 //! Later phases add cgroup v2 freezing and loopback ULA networking helpers here.
 
+#[cfg(unix)]
+pub mod handover;
 pub mod services;
 pub mod systemd;
 
