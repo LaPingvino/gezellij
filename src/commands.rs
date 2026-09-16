@@ -439,7 +439,7 @@ fn find_indexed_session(
     create: bool,
 ) -> ClientInfo {
     match sessions.get(index) {
-        Some(session) => ClientInfo::Attach(session.clone(), config_options),
+        Some(session) => attach_info(session.clone(), config_options),
         None if create => create_new_client(),
         None => {
             println!(
@@ -605,6 +605,30 @@ fn attach_with_session_index(config_options: Options, index: usize, create: bool
     }
 }
 
+/// Gezellij: attaching to a session whose server still runs a binary that has since been
+/// replaced on disk. Nothing is broken by it, but the two can drift apart, so say so once and
+/// point at the in-place upgrade (which keeps every process alive).
+#[cfg(unix)]
+fn warn_if_server_binary_was_replaced(session_name: &str) {
+    if let Some(warning) = zellij_utils::host_fabric::upgrade::session_upgrade_warning(session_name)
+    {
+        eprintln!("Note: {}.", warning);
+        eprintln!(
+            "      `zellij upgrade-server {}` moves it onto the new one without stopping anything \
+             that is running in it.",
+            session_name
+        );
+    }
+}
+#[cfg(not(unix))]
+fn warn_if_server_binary_was_replaced(_session_name: &str) {}
+
+/// Gezellij: [`ClientInfo::Attach`], with the upgrade check above.
+fn attach_info(session_name: String, config_options: Options) -> ClientInfo {
+    warn_if_server_binary_was_replaced(&session_name);
+    ClientInfo::Attach(session_name, config_options)
+}
+
 fn attach_with_session_name(
     session_name: Option<String>,
     config_options: Options,
@@ -612,7 +636,7 @@ fn attach_with_session_name(
 ) -> ClientInfo {
     match &session_name {
         Some(session) if create => match session_exists(session) {
-            Ok(true) => ClientInfo::Attach(session_name.unwrap(), config_options),
+            Ok(true) => attach_info(session_name.unwrap(), config_options),
             Ok(false) => ClientInfo::New(session_name.unwrap(), None, None, None),
             Err(kind) => {
                 eprintln!("{}", session_listing_error_message(kind));
@@ -621,7 +645,7 @@ fn attach_with_session_name(
         },
         Some(prefix) => match match_session_name(prefix) {
             Ok(SessionNameMatch::UniquePrefix(s)) | Ok(SessionNameMatch::Exact(s)) => {
-                ClientInfo::Attach(s, config_options)
+                attach_info(s, config_options)
             },
             Ok(SessionNameMatch::AmbiguousPrefix(sessions)) => {
                 println!(
@@ -654,7 +678,7 @@ fn attach_with_session_name(
                 eprintln!("No active zellij sessions found.");
                 process::exit(1);
             },
-            ActiveSession::One(session_name) => ClientInfo::Attach(session_name, config_options),
+            ActiveSession::One(session_name) => attach_info(session_name, config_options),
             ActiveSession::Many => {
                 println!("Please specify the session to attach to, either by using the full name or a unique prefix.\nThe following sessions are active:");
                 list_sessions(false, false, true);

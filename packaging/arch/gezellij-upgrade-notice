@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# gezellij-upgrade-notice — pacman PostTransaction notice for gezellij-git.
+#
+# Run by /usr/share/libalpm/hooks/gezellij.hook after the package is upgraded.
+#
+# It deliberately does NOTHING but print. pacman runs hooks as root, while
+# Gezellij sessions are per-user processes owned by whoever started them:
+# upgrading someone else's session as root would be wrong (and would need to
+# guess their $XDG_RUNTIME_DIR / $ZELLIJ_SOCKET_DIR anyway). So the migration
+# is left to each user, who can do it with one command.
+#
+# For the same reason the notice is unconditional: as root we cannot reliably
+# tell whether anybody has a running session, so we do not try.
+#
+# No bashisms, no assumptions about $HOME, and it always exits 0 — a notice
+# must never be able to fail a pacman transaction.
+
+printf '%s\n' \
+    'Running Gezellij sessions still use the OLD binary (it was replaced on disk).' \
+    'As your own user (not root), migrate them without losing any running process:' \
+    '' \
+    '    gezellij upgrade-server --all     # upgrade every session of the current user' \
+    '    gezellij upgrade-server <session> # or just one' \
+    '    gezellij list-sessions            # see what is running' \
+    '' \
+    'Pane processes keep their pid and the layout is preserved; scrollback is not' \
+    'carried over and attached clients are disconnected, so re-attach afterwards.' \
+    'See /usr/share/doc/gezellij/PACKAGING.md for the opt-in automatic variant.'
+
+exit 0

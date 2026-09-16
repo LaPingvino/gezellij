@@ -194,6 +194,10 @@ pub struct UpgradeServerCli {
     #[clap(value_parser)]
     pub session_name: Option<String>,
 
+    /// Upgrade every session of yours whose server still runs a replaced binary
+    #[clap(long, conflicts_with("session_name"))]
+    pub all: bool,
+
     /// Upgrade even if the server's binary has not been replaced on disk
     #[clap(long)]
     pub force: bool,

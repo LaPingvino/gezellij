@@ -1,0 +1,24 @@
+# Opt-in: migrate this user's running Gezellij servers onto a new binary.
+#
+# Not enabled by default. The package installs this file (and the matching
+# .path unit) read-only into /usr/share/gezellij/systemd/, which is not in the
+# systemd --user search path, so enable it by absolute path:
+#
+#   systemctl --user link   /usr/share/gezellij/systemd/gezellij-upgrade-sessions.service
+#   systemctl --user enable --now /usr/share/gezellij/systemd/gezellij-upgrade-sessions.path
+#
+# Undo:
+#
+#   systemctl --user disable --now gezellij-upgrade-sessions.path
+#   systemctl --user disable gezellij-upgrade-sessions.service
+#
+# Run it once by hand with:  systemctl --user start gezellij-upgrade-sessions
+
+[Unit]
+Description=Upgrade running Gezellij servers to the installed binary
+Documentation=file:///usr/share/doc/gezellij/PACKAGING.md
+ConditionPathExists=/usr/bin/gezellij
+
+[Service]
+Type=oneshot
+ExecStart=/usr/share/gezellij/systemd/gezellij-upgrade-sessions.sh

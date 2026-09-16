@@ -67,8 +67,8 @@ pub fn session_upgrade_warning(session_name: &str) -> Option<String> {
     let pid = server_pid(session_name)?;
     match binary_replaced(pid) {
         Ok(true) => Some(format!(
-            "the server of session '{}' (pid {}) runs a binary that has since been replaced on disk; \
-             new clients may not be able to attach until the session is restarted (or handed over)",
+            "session '{}' is still served by the binary it started with (pid {}), which has since \
+             been replaced on disk",
             session_name, pid
         )),
         _ => None,
@@ -178,6 +178,24 @@ pub fn write_exec_manifest(manifest: &ExecUpgradeManifest) -> io::Result<PathBuf
     fs::write(&tmp, json)?;
     fs::rename(&tmp, &path)?;
     Ok(path)
+}
+
+/// Where the server drops the reason an in-place upgrade did not happen, so the CLI can say
+/// *why* instead of waiting for a timeout.
+pub fn exec_error_path(session_name: &str) -> PathBuf {
+    exec_manifest_dir().join(format!("{}.exec.error", session_name))
+}
+
+pub fn write_exec_error(session_name: &str, reason: &str) {
+    let _ = fs::create_dir_all(exec_manifest_dir());
+    let _ = fs::write(exec_error_path(session_name), reason);
+}
+
+pub fn take_exec_error(session_name: &str) -> Option<String> {
+    let path = exec_error_path(session_name);
+    let reason = fs::read_to_string(&path).ok()?;
+    let _ = fs::remove_file(&path);
+    Some(reason)
 }
 
 pub fn read_exec_manifest(path: &Path) -> io::Result<ExecUpgradeManifest> {

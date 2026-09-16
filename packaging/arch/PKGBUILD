@@ -151,6 +151,30 @@ package() {
     install -Dm755 "$srcdir/gezellij/packaging/login/gezellij-login-setup.sh" \
         "$pkgdir/usr/bin/gezellij-login-setup"
 
+    # Package-upgrade notice.
+    #
+    # Upgrading the package replaces /usr/bin/gezellij while running servers
+    # keep executing the old (now deleted) file. The hook only *tells* the user
+    # about it: pacman runs hooks as root, but sessions are per-user processes,
+    # so migrating them (`gezellij upgrade-server --all`) is each user's own
+    # one-liner and must not be done as root.
+    install -Dm644 packaging/arch/gezellij.hook \
+        "$pkgdir/usr/share/libalpm/hooks/gezellij.hook"
+    install -Dm755 packaging/arch/gezellij-upgrade-notice \
+        "$pkgdir/usr/share/libalpm/scripts/gezellij-upgrade-notice"
+
+    # Opt-in automatic variant of that migration: a per-user helper plus a
+    # systemd --user path/service pair that runs it when /usr/bin/gezellij
+    # changes. Installed as documentation/templates only — NOT enabled, and not
+    # in the systemd --user search path. See packaging/README.md ("Upgrading")
+    # for the `systemctl --user link`/`enable` incantation and how to undo it.
+    install -Dm755 packaging/login/gezellij-upgrade-sessions.sh \
+        "$pkgdir/usr/share/gezellij/systemd/gezellij-upgrade-sessions.sh"
+    install -Dm644 packaging/login/gezellij-upgrade-sessions.service \
+        "$pkgdir/usr/share/gezellij/systemd/gezellij-upgrade-sessions.service"
+    install -Dm644 packaging/login/gezellij-upgrade-sessions.path \
+        "$pkgdir/usr/share/gezellij/systemd/gezellij-upgrade-sessions.path"
+
     install -Dm644 LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.md"
     install -Dm644 GEZELLIJ_PLAN.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_PLAN.md"
     install -Dm644 GEZELLIJ_SERVICES.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_SERVICES.md"

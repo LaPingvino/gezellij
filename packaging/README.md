@@ -1,12 +1,13 @@
 # Packaging Gezellij
 
-Two independent pieces live here, both designed so that **nothing they do can
+Three independent pieces live here, all designed so that **nothing they do can
 break your login and everything is one command away from being undone**:
 
 | Path | What it is |
 |---|---|
 | `arch/PKGBUILD` | `gezellij-git` Arch package — installs the fork as `/usr/bin/gezellij`, next to (not over) the stock `zellij`. |
 | `login/gezellij-login-setup.sh` | Makes Gezellij greet you at login, replacing byobu/tmux/screen auto-attach setups reversibly. Installed by the package as `/usr/bin/gezellij-login-setup`. |
+| `arch/gezellij.hook` + `login/gezellij-upgrade-sessions.*` | Makes a package upgrade obvious: a pacman hook that prints a notice, and an opt-in `systemd --user` pair that migrates your running sessions onto the new binary. See [§3 Upgrading](#3-upgrading). |
 
 ---
 
@@ -31,9 +32,16 @@ sudo pacman -R gezellij-git
 /usr/share/bash-completion/completions/gezellij
 /usr/share/zsh/site-functions/_gezellij
 /usr/share/fish/vendor_completions.d/gezellij.fish
+/usr/share/libalpm/hooks/gezellij.hook
+/usr/share/libalpm/scripts/gezellij-upgrade-notice
+/usr/share/gezellij/systemd/gezellij-upgrade-sessions.{sh,service,path}
 /usr/share/doc/gezellij/{GEZELLIJ_PLAN.md,GEZELLIJ_SERVICES.md,PACKAGING.md}
 /usr/share/licenses/gezellij-git/LICENSE.md
 ```
+
+The `libalpm` hook only *prints* a notice after an upgrade and the
+`usr/share/gezellij/systemd` files are inert templates — nothing is enabled.
+See [§3 Upgrading](#3-upgrading).
 
 Nothing is installed under the name `zellij`, and the PKGBUILD deliberately has
 **no `provides=`/`conflicts=` for `zellij`**: the distro `zellij` package stays
@@ -166,7 +174,134 @@ touch ~/.config/gezellij/no-autostart     # or: export GEZELLIJ_NO_AUTOSTART=1
 
 ---
 
-## 3. Caveats (until the rename phase lands)
+## 3. Upgrading
+
+### What a package upgrade does to running sessions
+
+Upgrading `gezellij-git` replaces `/usr/bin/gezellij` on disk. Running servers
+do **not** notice: each one keeps executing the old, now-deleted file (that is
+exactly what `/proc/<pid>/exe` ending in `" (deleted)"` means), and so do all
+the processes in your panes. Nothing breaks, but you stay on the old build
+until you say otherwise.
+
+Because of that, the package installs a pacman `PostTransaction` hook
+(`/usr/share/libalpm/hooks/gezellij.hook`) whose only job is to print a short
+reminder. It deliberately does not touch anybody's sessions: pacman runs as
+root, sessions are per-user processes, and migrating someone else's session as
+root would be wrong. The notice is unconditional — as root we cannot reliably
+tell whether anyone has a session running — so you will also see it on a plain
+reinstall (pacman counts reinstalling an installed package as an upgrade).
+
+### The manual flow
+
+As your own user:
+
+```sh
+gezellij list-sessions                 # what is running
+gezellij upgrade-server --all          # migrate every session of this user
+gezellij upgrade-server <session>      # ... or just one
+gezellij attach <session>              # re-attach afterwards
+```
+
+`upgrade-server` sends `SIGUSR2` to the session's server (its pid is recorded
+in `<socket dir>/<session>.server-pid`); the server writes its resurrection
+layout, then `execve`s the *new* binary in place, handing over the live PTY
+file descriptors. `--all` does that for every server of the current user whose
+binary was replaced on disk, so running it twice is a no-op.
+
+**What survives:**
+
+* every process in every pane — same pid, not restarted, not reparented;
+* the server's own pid (so `systemd` and any supervisor keep tracking it);
+* the layout: tabs, tiled and floating panes, working directories, and the
+  per-pane restart policy.
+
+**What does not:**
+
+* **scrollback** — pane history is not carried across the exec;
+* **attached clients** — they are dropped, not told to reconnect, so re-attach
+  with `gezellij attach <session>`;
+* **plugins** — WASM plugins are restarted and lose their state;
+* the terminal grid contents of a pane (the program repaints, as after a
+  detach/attach cycle).
+
+### The opt-in automatic flow
+
+If you would rather never think about it, the package ships (but does not
+enable) a per-user helper plus two `systemd --user` units in
+`/usr/share/gezellij/systemd/`:
+
+| File | What it is |
+|---|---|
+| `gezellij-upgrade-sessions.sh` | runs `gezellij upgrade-server --all`, skipping the session you are inside (`$ZELLIJ`) |
+| `gezellij-upgrade-sessions.service` | `Type=oneshot`, runs that script |
+| `gezellij-upgrade-sessions.path` | `PathChanged=/usr/bin/gezellij`, i.e. fires right after an upgrade replaces the binary |
+
+That directory is **not** in the `systemd --user` search path, so enable the
+units by absolute path:
+
+```sh
+systemctl --user link   /usr/share/gezellij/systemd/gezellij-upgrade-sessions.service
+systemctl --user enable --now /usr/share/gezellij/systemd/gezellij-upgrade-sessions.path
+```
+
+(the `.path` unit refers to the `.service` by name, which is why the service is
+linked separately). Copying both unit files into `~/.config/systemd/user/` and
+running `systemctl --user daemon-reload` works just as well.
+
+Undo — this leaves nothing behind:
+
+```sh
+systemctl --user disable --now gezellij-upgrade-sessions.path
+systemctl --user disable gezellij-upgrade-sessions.service
+```
+
+(`disable` removes the symlinks `link` created; delete the copies by hand if
+you copied the units instead.)
+
+Prefer a shell rc? Put this in your *login* rc (`~/.zprofile`, `~/.profile`)
+**before** any `gezellij-login-setup` block, so the upgrade runs first and the
+auto-attach that follows lands on the new server:
+
+```sh
+/usr/share/gezellij/systemd/gezellij-upgrade-sessions.sh >/dev/null 2>&1 || true
+```
+
+The `|| true` is deliberate: the script passes `upgrade-server`'s exit status
+through (so `systemctl --user status` shows real failures), and a failed
+upgrade must not abort your login shell.
+
+Two things worth knowing about the unit variant: `PathChanged` can fire more
+than once per pacman transaction (harmless — `--all` is idempotent), and the
+unit inherits `XDG_RUNTIME_DIR` from the user manager, so it sees the same
+sessions as your shell — *unless* you override `ZELLIJ_SOCKET_DIR` in your
+shell rc, which the unit will not see. Use
+`systemctl --user set-environment ZELLIJ_SOCKET_DIR=...` in that case.
+
+### If an upgrade goes wrong
+
+There is no rollback after the `exec`: the successor process *is* the old
+process, so a successor that fails to adopt the panes cannot hand them back.
+The honest fallback is the resurrection layout the server wrote to disk right
+before the exec (`session-layout.kdl` in the session's cache directory). If the
+broken server is still running it holds the socket, so end it first — otherwise
+`attach` just connects to the broken server and nothing is resurrected:
+
+```sh
+gezellij kill-session <session>            # or, if it no longer answers:
+kill "$(cat <socket dir>/<session>.server-pid)"
+gezellij attach <session>
+```
+
+rebuilds the session from it — same tabs, same panes, same commands and working
+directories, but with **fresh processes**, so whatever was running in the panes
+is started again rather than continued. And the stock distro `zellij` binary is
+still installed and untouched (see §1), so a known-good multiplexer is always
+one command away.
+
+---
+
+## 4. Caveats (until the rename phase lands)
 
 * **Shared config directory.** Gezellij still reads `~/.config/zellij`
   (`ZELLIJ_CONFIG_DIR` / `--config-dir` override it). Config changes you make

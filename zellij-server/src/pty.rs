@@ -880,7 +880,14 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                     // this call never returns (we exec the new binary); on failure we log and
                     // keep running exactly as before.
                     if let Err(e) = pty.perform_exec_upgrade(session_layout_metadata) {
-                        log::error!("in-place upgrade aborted, server keeps running: {:#}", e);
+                        let reason = format!("{:#}", e);
+                        log::error!("in-place upgrade aborted, server keeps running: {}", reason);
+                        if let Ok(session_name) = zellij_utils::envs::get_session_name() {
+                            zellij_utils::host_fabric::upgrade::write_exec_error(
+                                &session_name,
+                                &reason,
+                            );
+                        }
                     }
                     continue;
                 }

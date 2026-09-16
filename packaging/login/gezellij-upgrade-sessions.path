@@ -1,0 +1,18 @@
+# Opt-in: watch /usr/bin/gezellij and run the upgrade right after a package
+# upgrade replaces it. See gezellij-upgrade-sessions.service for the enable /
+# undo commands; enabling this .path is what actually turns the feature on.
+#
+# PathChanged may fire more than once for a single pacman transaction; that is
+# harmless, because `gezellij upgrade-server --all` only touches servers whose
+# binary really was replaced on disk and is a no-op otherwise.
+
+[Unit]
+Description=Watch for a new Gezellij binary and upgrade running servers
+Documentation=file:///usr/share/doc/gezellij/PACKAGING.md
+
+[Path]
+PathChanged=/usr/bin/gezellij
+Unit=gezellij-upgrade-sessions.service
+
+[Install]
+WantedBy=default.target

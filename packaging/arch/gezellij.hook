@@ -1,0 +1,9 @@
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = gezellij-git
+
+[Action]
+Description = Notifying about running Gezellij sessions...
+When = PostTransaction
+Exec = /usr/share/libalpm/scripts/gezellij-upgrade-notice
