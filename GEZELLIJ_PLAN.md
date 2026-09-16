@@ -120,13 +120,14 @@
 - [ ] Implement `gezellij upgrade-server` / `--replace-server` CLI action.
 
 ### Phase 4: Network & Loopback IPv6 Helpers
-- [ ] Add `--bind-ip <ipv6>` flag to service / pane runners.
-- [ ] Helper utilities for managing loopback ULA IPs on Linux (`ip -6 addr add ... dev lo`).
-- [ ] Provide Caddy / reverse-proxy configuration snippet export.
+- [x] Add `--bind-ip <ipv6>` flag to service / pane runners. *(`service add --bind-ip`: the address is derived per service from a per-installation random ULA prefix and exported as `GEZELLIJ_BIND_ADDR/_PORT/_URL`; same port everywhere)*
+- [x] Helper utilities for managing loopback ULA IPs on Linux. *(`host_fabric/net.rs`; one-time root `ip -6 route add local <prefix> dev lo` printed by `service net-setup`, no per-address adds)*
+- [x] Provide Caddy / reverse-proxy configuration snippet export. *(`service net-export [name] --format caddy|hosts`)*
+- [ ] Pane-level `--bind-ip` for `zellij run` (services only so far).
 
 ### Phase 5: Branding & UX Polish
-- [ ] Rebrand internal strings, defaults, and cache folders to `gezellij` with fallback migration from `zellij`.
-- [ ] Custom "Gezellig" themes (warm, cozy color palettes for long terminal sessions).
+- [ ] Rebrand internal strings, defaults, and cache folders to `gezellij` with fallback migration from `zellij`. *(interim: the Arch package installs the binary as `/usr/bin/gezellij` beside stock zellij, sharing config and socket dirs)*
+- [x] Custom "Gezellig" themes (warm, cozy color palettes for long terminal sessions). *(`gezellig-dark`, `gezellig-light`; see `GEZELLIJ_THEMES.md`)*
 - [ ] Comprehensive documentation and demo screencasts.
 
 ---
