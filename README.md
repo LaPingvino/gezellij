@@ -1,3 +1,26 @@
+> ### 🇳🇱 This is **Gezellij**, a fork of Zellij
+>
+> *Zellij* + *gezellig* (Dutch for cozy and companionable). A terminal workspace that doubles as a
+> **host-native process fabric**: lighter, safer and easier than Docker for looking after things on
+> a server, with Zellij's UI as its face.
+>
+> What the fork adds on top of everything below:
+>
+> | | |
+> |---|---|
+> | **[Services](GEZELLIJ_SERVICES.md)** | `zellij service add --name api -- ./start.sh` — a supervised background command with a restart policy, living in a detached session. `list`, `logs`, `attach`, `export-systemd`. |
+> | **[Live upgrades](GEZELLIJ_UPGRADE.md)** | `zellij upgrade-server --all` — the server replaces itself with the newly installed binary **in place**. Every process in your panes keeps running, same pids. No more losing a day's work to `pacman -Syu`. |
+> | **[Freeze & thaw](GEZELLIJ_FREEZE.md)** | `zellij freeze mywork` — cgroup v2 freezer: a whole session paused in the kernel at 0% CPU, memory intact, thawed instantly. No signals, no root. |
+> | **Networking** | Swap ports for addresses: each service gets its own IPv6 loopback address from a per-installation ULA prefix, so everything can listen on the same port. `service net-setup`, `net-export --format caddy`. |
+> | **[Themes](GEZELLIJ_THEMES.md)** | `gezellig-dark` / `gezellig-light`: warm, low-blue-light palettes for long sessions. |
+> | **[Packaging](packaging/README.md)** | An Arch `PKGBUILD` that installs alongside stock Zellij, and a reversible script that makes Gezellij greet you at login instead of byobu/tmux/screen. |
+>
+> The plan and its reasoning live in **[GEZELLIJ_PLAN.md](GEZELLIJ_PLAN.md)**; the upgrade
+> mechanism is designed in **[HANDOVER_DESIGN.md](HANDOVER_DESIGN.md)**; `tests/` holds an
+> end-to-end suite for all of it.
+>
+> Everything below is upstream Zellij's README, unchanged.
+
 <h1 align="center">
   <br>
   <img src="https://raw.githubusercontent.com/zellij-org/zellij/main/assets/logo.png" alt="logo" width="200">
