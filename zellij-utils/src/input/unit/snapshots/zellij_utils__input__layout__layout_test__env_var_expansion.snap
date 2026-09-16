@@ -1,7 +1,6 @@
 ---
 source: zellij-utils/src/input/./unit/layout_test.rs
-assertion_line: 2230
-expression: "format!(\"{layout:#?}\")"
+expression: "normalize_layout_debug(format!(\"{layout:#?}\"))"
 ---
 Layout {
     tabs: [
@@ -116,6 +115,7 @@ Layout {
                                     hold_on_start: false,
                                     originating_plugin: None,
                                     use_terminal_title: false,
+                                    restart: No,
                                 },
                             ),
                         ),
@@ -200,6 +200,7 @@ Layout {
                                     hold_on_start: false,
                                     originating_plugin: None,
                                     use_terminal_title: false,
+                                    restart: No,
                                 },
                             ),
                         ),
@@ -375,6 +376,7 @@ Layout {
                                     hold_on_start: false,
                                     originating_plugin: None,
                                     use_terminal_title: false,
+                                    restart: No,
                                 },
                             ),
                         ),
@@ -459,6 +461,7 @@ Layout {
                                     hold_on_start: false,
                                     originating_plugin: None,
                                     use_terminal_title: false,
+                                    restart: No,
                                 },
                             ),
                         ),

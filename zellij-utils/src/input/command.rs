@@ -118,7 +118,7 @@ impl FromStr for RestartPolicy {
     }
 }
 
-#[derive(Clone, Deserialize, Default, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Default, Serialize, PartialEq, Eq)]
 pub struct RunCommand {
     #[serde(alias = "cmd")]
     pub command: PathBuf,
@@ -139,26 +139,6 @@ pub struct RunCommand {
     pub restart: RestartPolicy,
 }
 
-// Hand-written Debug: identical to the derived output, except that the Gezellij `restart`
-// field is only printed when it is not the default. This keeps the (many) upstream Debug
-// snapshots byte-for-byte stable so merges from upstream Zellij stay conflict-free.
-impl std::fmt::Debug for RunCommand {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = f.debug_struct("RunCommand");
-        s.field("command", &self.command)
-            .field("args", &self.args)
-            .field("cwd", &self.cwd)
-            .field("hold_on_close", &self.hold_on_close)
-            .field("hold_on_start", &self.hold_on_start)
-            .field("originating_plugin", &self.originating_plugin)
-            .field("use_terminal_title", &self.use_terminal_title);
-        if !self.restart.is_no() {
-            s.field("restart", &self.restart);
-        }
-        s.finish()
-    }
-}
-
 impl std::fmt::Display for RunCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut command: String = self
@@ -176,7 +156,7 @@ impl std::fmt::Display for RunCommand {
 }
 
 /// Intermediate representation
-#[derive(Clone, Deserialize, Default, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Default, Serialize, PartialEq, Eq)]
 pub struct RunCommandAction {
     #[serde(rename = "cmd")]
     pub command: PathBuf,
@@ -197,25 +177,6 @@ pub struct RunCommandAction {
     /// Gezellij: supervision policy applied when the command exits.
     #[serde(default, skip_serializing_if = "RestartPolicy::is_no")]
     pub restart: RestartPolicy,
-}
-
-// See the note on `impl Debug for RunCommand`.
-impl std::fmt::Debug for RunCommandAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = f.debug_struct("RunCommandAction");
-        s.field("command", &self.command)
-            .field("args", &self.args)
-            .field("cwd", &self.cwd)
-            .field("direction", &self.direction)
-            .field("hold_on_close", &self.hold_on_close)
-            .field("hold_on_start", &self.hold_on_start)
-            .field("originating_plugin", &self.originating_plugin)
-            .field("use_terminal_title", &self.use_terminal_title);
-        if !self.restart.is_no() {
-            s.field("restart", &self.restart);
-        }
-        s.finish()
-    }
 }
 
 impl From<RunCommandAction> for RunCommand {
@@ -356,15 +317,18 @@ mod tests {
     }
 
     #[test]
-    fn run_command_debug_omits_default_restart() {
+    fn run_command_debug_shows_the_restart_policy() {
+        // This used to assert the opposite: a hand-written Debug hid a default `restart` so that
+        // upstream Zellij's insta snapshots stayed byte-identical. We no longer optimise for
+        // merging upstream, so the derived Debug is back and it shows every field.
         let run_command = RunCommand {
             command: PathBuf::from("tail"),
             ..Default::default()
         };
         let debug = format!("{:?}", run_command);
         assert!(
-            !debug.contains("restart"),
-            "expected no restart field in debug output, got: {}",
+            debug.contains("restart: No"),
+            "expected the restart policy in debug output, got: {}",
             debug
         );
     }
