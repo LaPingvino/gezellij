@@ -174,6 +174,31 @@ pub(crate) fn start_server(path: PathBuf, debug: bool, foreground: bool, adopt: 
     let os_input = get_os_input(get_server_os_input);
     // Gezellij: an in-place successor must keep the pid it inherited, so it never daemonizes
     let foreground = foreground || adopt.is_some();
+    // ... and it must bind the socket path *this* binary would use, not the one the old binary
+    // computed. ZELLIJ_SOCK_DIR is scoped by CLIENT_SERVER_CONTRACT_VERSION, so when an upgrade
+    // also changes the contract, the path we were handed points at the previous version's
+    // directory - where no new client will ever look. That is exactly how an upgraded server ends
+    // up lingering invisibly in the background.
+    let path = match adopt.as_ref() {
+        Some(manifest) => match zellij_utils::host_fabric::upgrade::read_exec_manifest(manifest) {
+            Ok(manifest) => {
+                let ours = zellij_utils::consts::ZELLIJ_SOCK_DIR.join(&manifest.session_name);
+                if ours != path {
+                    log::info!(
+                        "adopting across a client-server contract change: binding {} instead of {}",
+                        ours.display(),
+                        path.display()
+                    );
+                    // the old name would otherwise sit there forever looking like a live session
+                    let _ = std::fs::remove_file(&path);
+                }
+                ours
+            },
+            // let the server fail later with its own, clearer error
+            Err(_) => path,
+        },
+        None => path,
+    };
     if let Some(manifest) = adopt {
         let _ = zellij_server::ADOPT_MANIFEST.set(manifest);
     }

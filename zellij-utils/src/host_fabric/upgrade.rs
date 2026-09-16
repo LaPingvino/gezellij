@@ -161,12 +161,94 @@ impl ExecUpgradeManifest {
     }
 }
 
+/// Sessions whose socket lives in a *different* `contract_version_N` directory than the one this
+/// binary speaks. Such a server is stranded: it is still running, still holding your processes,
+/// but `list-sessions` cannot see it because it only scans our own contract directory. Returns
+/// `(session name, socket path, recorded server pid if any)`.
+///
+/// This is the "old server lingering in the background after an upgrade" case. We can *find* it;
+/// whether we can migrate it depends on whether it recorded a pid (see [`server_pid`]), because
+/// only a server that understands the handover signal may be signalled at all - the default
+/// disposition of `SIGUSR2` is to kill the process.
+pub fn stranded_sessions() -> Vec<(String, PathBuf, Option<u32>)> {
+    let ours = &*ZELLIJ_SOCK_DIR;
+    let Some(parent) = ours.parent() else {
+        return vec![];
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return vec![];
+    };
+    let mut stranded = vec![];
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if &dir == ours || !dir.is_dir() {
+            continue;
+        }
+        if !dir
+            .file_name()
+            .map(|n| n.to_string_lossy().starts_with("contract_version_"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Ok(sockets) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for socket in sockets.flatten() {
+            let path = socket.path();
+            let name = socket.file_name().to_string_lossy().into_owned();
+            // skip our own side-car records, we only want the sockets themselves
+            if name.contains('.') {
+                continue;
+            }
+            let pid = fs::read_to_string(dir.join(format!("{}{}", name, PID_RECORD_SUFFIX)))
+                .ok()
+                .and_then(|p| p.trim().parse::<u32>().ok())
+                .filter(|pid| PathBuf::from(format!("/proc/{}", pid)).is_dir());
+            stranded.push((name, path, pid));
+        }
+    }
+    stranded.sort();
+    stranded
+}
+
 pub fn exec_manifest_dir() -> PathBuf {
     ZELLIJ_SOCK_DIR.join("handover")
 }
 
 pub fn exec_manifest_path(session_name: &str) -> PathBuf {
-    exec_manifest_dir().join(format!("{}.exec.json", session_name))
+    exec_manifest_path_in(&ZELLIJ_SOCK_DIR, session_name)
+}
+
+/// The manifest a server whose socket lives in `socket_dir` would write. A server stranded in an
+/// older `contract_version_N` directory writes there, not next to ours, so anything watching for
+/// its progress has to look in its directory.
+pub fn exec_manifest_path_in(socket_dir: &Path, session_name: &str) -> PathBuf {
+    socket_dir
+        .join("handover")
+        .join(format!("{}.exec.json", session_name))
+}
+
+/// See [`exec_manifest_path_in`].
+pub fn exec_error_path_in(socket_dir: &Path, session_name: &str) -> PathBuf {
+    socket_dir
+        .join("handover")
+        .join(format!("{}.exec.error", session_name))
+}
+
+/// The pid a server recorded next to its socket in `socket_dir`, if that process still exists.
+pub fn server_pid_in(socket_dir: &Path, session_name: &str) -> Option<u32> {
+    let pid: u32 =
+        fs::read_to_string(socket_dir.join(format!("{}{}", session_name, PID_RECORD_SUFFIX)))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+    if PathBuf::from(format!("/proc/{}", pid)).is_dir() {
+        Some(pid)
+    } else {
+        None
+    }
 }
 
 pub fn write_exec_manifest(manifest: &ExecUpgradeManifest) -> io::Result<PathBuf> {

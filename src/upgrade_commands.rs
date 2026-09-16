@@ -6,15 +6,29 @@
 //! `execve` of the new binary, and the successor rebuilds the session around them (see
 //! `HANDOVER_DESIGN.md` and `zellij_utils::host_fabric::upgrade`).
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use zellij_utils::{
     cli::{CliArgs, UpgradeServerCli},
+    consts::ZELLIJ_SOCK_DIR,
     envs,
     host_fabric::upgrade::{
-        binary_replaced, exec_error_path, exec_manifest_path, server_pid, take_exec_error,
+        binary_replaced, exec_error_path_in, exec_manifest_path_in, server_pid, server_pid_in,
+        stranded_sessions,
     },
     sessions::{get_active_session, get_sessions, session_exists, ActiveSession},
 };
+
+/// A server we could ask to replace itself.
+struct Candidate {
+    session: String,
+    pid: u32,
+    /// The socket directory *that server* uses. Normally ours; for a session stranded by a
+    /// client-server contract change it is an older `contract_version_N` directory, and that is
+    /// where it writes its handover manifest and any failure reason.
+    socket_dir: PathBuf,
+    stranded: bool,
+}
 
 fn fail(message: impl std::fmt::Display) -> ! {
     eprintln!("{}", message);
@@ -62,31 +76,29 @@ pub(crate) fn run(opts: CliArgs, cli: UpgradeServerCli) {
         return;
     }
     let session = resolve_session(&opts, &cli);
-    if !upgrade_one(&session, cli.force, cli.timeout) {
+    if !upgrade_named(&session, cli.force, cli.timeout) {
         std::process::exit(1);
     }
 }
 
-/// Upgrade every session whose server is running a binary that is no longer on disk.
+/// Upgrade every session whose server is running a binary that is no longer on disk - including
+/// sessions stranded in an older contract directory, which `get_sessions` cannot see but whose
+/// pid record proves they understand the handover.
 fn run_all(cli: &UpgradeServerCli) {
-    let sessions: Vec<String> = get_sessions()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
-    if sessions.is_empty() {
-        println!("No active sessions.");
-        return;
-    }
     let overridden = std::env::var_os("GEZELLIJ_UPGRADE_BINARY").is_some();
-    let mut stale = vec![];
+    let mut stale: Vec<Candidate> = vec![];
     let mut current = vec![];
     let mut unknown = vec![];
-    for session in sessions {
+    for (session, _) in get_sessions().unwrap_or_default() {
         match server_pid(&session) {
             Some(pid) => {
                 if binary_replaced(pid).unwrap_or(false) || cli.force || overridden {
-                    stale.push(session);
+                    stale.push(Candidate {
+                        session,
+                        pid,
+                        socket_dir: ZELLIJ_SOCK_DIR.to_path_buf(),
+                        stranded: false,
+                    });
                 } else {
                     current.push(session);
                 }
@@ -94,7 +106,18 @@ fn run_all(cli: &UpgradeServerCli) {
             None => unknown.push(session),
         }
     }
-    stale.sort();
+    // A stranded session is worth rescuing whenever the binary at its recorded path really was
+    // replaced - re-exec'ing the same old binary would leave it exactly where it is.
+    for candidate in stranded_candidates() {
+        if binary_replaced(candidate.pid).unwrap_or(false) || overridden {
+            stale.push(candidate);
+        }
+    }
+    if stale.is_empty() && current.is_empty() && unknown.is_empty() {
+        println!("No active sessions.");
+        return;
+    }
+    stale.sort_by(|a, b| a.session.cmp(&b.session));
     current.sort();
     unknown.sort();
     if !current.is_empty() {
@@ -109,14 +132,15 @@ fn run_all(cli: &UpgradeServerCli) {
             unknown.join(", ")
         );
     }
+    report_stranded_sessions();
     if stale.is_empty() {
         println!("Nothing to upgrade.");
         return;
     }
     let total = stale.len();
     let mut upgraded = 0;
-    for session in stale {
-        if upgrade_one(&session, cli.force, cli.timeout) {
+    for candidate in &stale {
+        if upgrade_one(candidate, cli.force, cli.timeout) {
             upgraded += 1;
         }
     }
@@ -126,12 +150,48 @@ fn run_all(cli: &UpgradeServerCli) {
     }
 }
 
+/// Sessions left behind in an older client-server contract directory, which `list-sessions`
+/// cannot see. Reporting them is the most we can safely do: a server that never recorded a pid
+/// predates the handover and must not be signalled (the default action for `SIGUSR2` is to kill
+/// the process, which would take the session with it).
+fn report_stranded_sessions() {
+    let stranded = zellij_utils::host_fabric::upgrade::stranded_sessions();
+    if stranded.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "{} session(s) from an older version are still running but invisible to this binary,",
+        stranded.len()
+    );
+    println!("because it speaks a different client-server contract:");
+    for (name, socket, pid) in &stranded {
+        match pid {
+            Some(pid) => println!("    {}  (pid {}, socket {})", name, pid, socket.display()),
+            None => println!("    {}  (socket {})", name, socket.display()),
+        }
+    }
+    println!();
+    println!("They keep running, and whatever is in them is still alive. To pick one up you need");
+    println!("the binary that started it, e.g. an older `zellij`, and `attach` with that. Nothing");
+    println!("here can migrate them in place: only a server that recorded a pid understands the");
+    println!("handover, and signalling one that does not would kill it.");
+    println!();
+}
+
 /// Returns whether the session was upgraded. Never exits, so `--all` can carry on.
-fn upgrade_one(session: &str, force: bool, timeout_secs: Option<u64>) -> bool {
-    let session = session.to_string();
-    let pid = match server_pid(&session) {
+fn upgrade_named(session: &str, force: bool, timeout_secs: Option<u64>) -> bool {
+    let pid = match server_pid(session) {
         Some(pid) => pid,
         None => {
+            // It may still be reachable: a session stranded in an older contract directory is
+            // invisible to `session_exists`, but its pid record is right next to its own socket.
+            if let Some(candidate) = stranded_candidates()
+                .into_iter()
+                .find(|c| c.session == session)
+            {
+                return upgrade_one(&candidate, force, timeout_secs);
+            }
             eprintln!(
                 "Cannot find the server pid of session '{}'. Its server predates upgrade support; \
                  restart the session once with this binary and it will be upgradable from then on.",
@@ -140,9 +200,59 @@ fn upgrade_one(session: &str, force: bool, timeout_secs: Option<u64>) -> bool {
             return false;
         },
     };
+    upgrade_one(
+        &Candidate {
+            session: session.to_string(),
+            pid,
+            socket_dir: ZELLIJ_SOCK_DIR.to_path_buf(),
+            stranded: false,
+        },
+        force,
+        timeout_secs,
+    )
+}
+
+/// Sessions stranded in an older contract directory whose server recorded a pid - the record is
+/// itself the proof that it understands the handover and may safely be signalled.
+fn stranded_candidates() -> Vec<Candidate> {
+    stranded_sessions()
+        .into_iter()
+        .filter_map(|(session, socket, _)| {
+            let socket_dir = socket.parent()?.to_path_buf();
+            let pid = server_pid_in(&socket_dir, &session)?;
+            Some(Candidate {
+                session,
+                pid,
+                socket_dir,
+                stranded: true,
+            })
+        })
+        .collect()
+}
+
+fn upgrade_one(candidate: &Candidate, force: bool, timeout_secs: Option<u64>) -> bool {
+    let Candidate {
+        session,
+        pid,
+        socket_dir,
+        stranded,
+    } = candidate;
+    let (session, pid, stranded) = (session.clone(), *pid, *stranded);
     let replaced = binary_replaced(pid).unwrap_or(false);
     let overridden = std::env::var_os("GEZELLIJ_UPGRADE_BINARY").is_some();
     if !replaced && !force && !overridden {
+        if stranded {
+            // Re-exec'ing would just start the same old binary again, leaving it stranded.
+            eprintln!(
+                "Session '{}' (pid {}) is stranded in an older contract directory, but the binary \
+                 it runs ({}) is still the one on disk, so replacing itself would change nothing. \
+                 Install the newer build at that path, then run this again.",
+                session,
+                pid,
+                exe_of(pid)
+            );
+            return false;
+        }
         println!(
             "The server of session '{}' (pid {}) still runs the binary that is on disk ({}); nothing to upgrade.\n\
              Use --force to re-exec it anyway.",
@@ -162,9 +272,17 @@ fn upgrade_one(session: &str, force: bool, timeout_secs: Option<u64>) -> bool {
         session
     );
 
-    let manifest = exec_manifest_path(&session);
+    if stranded {
+        println!(
+            "  (this session was stranded in {} - after the upgrade it rejoins the ones this \
+             binary can see)",
+            socket_dir.display()
+        );
+    }
+    let manifest = exec_manifest_path_in(socket_dir, &session);
+    let error_path = exec_error_path_in(socket_dir, &session);
     let _ = std::fs::remove_file(&manifest);
-    let _ = std::fs::remove_file(exec_error_path(&session));
+    let _ = std::fs::remove_file(&error_path);
     // SIGUSR2 asks the server to snapshot and exec
     let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR2) };
     if sent != 0 {
@@ -186,7 +304,10 @@ fn upgrade_one(session: &str, force: bool, timeout_secs: Option<u64>) -> bool {
         if manifest.exists() {
             saw_manifest = true;
         }
-        if let Some(reason) = take_exec_error(&session) {
+        if let Some(reason) = std::fs::read_to_string(&error_path).ok().map(|r| {
+            let _ = std::fs::remove_file(&error_path);
+            r
+        }) {
             eprintln!("Could not upgrade session '{}': {}", session, reason);
             eprintln!("Its server is untouched and still running; nothing was lost.");
             return false;

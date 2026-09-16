@@ -338,3 +338,65 @@ What this variant does *not* give: rollback after `exec` (a successor that fails
 the session to be resurrected from the layout on disk), and attached clients are dropped rather
 than told to reconnect. Scrollback is not carried (per §5.1 of the plan). The socket transport in
 `host_fabric/handover.rs` remains the path to a rollback-safe variant.
+
+## 14. The old server offering itself (design, not yet built)
+
+§13 solved "upgrade the session I am sitting in" with `execve`. It cannot solve a different
+case: a server that is *already* lingering from a previous version. By the time you notice, the
+only process that could hand anything over is one you may not signal, and across a
+`CLIENT_SERVER_CONTRACT_VERSION` change it is not even visible to `list-sessions`.
+
+The way out, and the reason the socket transport in `host_fabric/handover.rs` is worth keeping:
+**let the old server offer itself, over a protocol that never changes.**
+
+### Why a separate protocol is the crux
+
+`ZELLIJ_SOCK_DIR` is scoped by the contract version, and the client-server protocol evolves. The
+handover protocol does not have to. A length-prefixed JSON manifest plus PTY master descriptors
+over `SCM_RIGHTS` is a tiny, stable surface. Freeze it once (`HANDOVER_PROTOCOL_VERSION`) and a
+binary from any future version can talk to a server from any past one, long after the main IPC
+contract has moved on. That is precisely the gap that strands sessions today.
+
+### Flow
+
+1. **The old server notices it was replaced.** It already records its pid; it can equally watch
+   its own `/proc/self/exe` for the ` (deleted)` marker (cheap, poll it on the same timer the
+   auto-freeze supervisor already runs on). No CLI, no signal, no cooperation from anyone.
+2. **It offers itself.** It binds `<version-independent dir>/<session>.handover`, writes a small
+   advertisement next to it (session name, old version, protocol version, pid), and keeps serving
+   its clients exactly as before. Nothing has changed for the user yet; this is an offer, not a
+   commitment.
+3. **A new binary looks for offers.** On `attach <name>` that finds nothing in its own contract
+   directory - today's silent "create a fresh empty session" - it first checks for an
+   advertisement. On `upgrade-server --all` it checks unconditionally.
+4. **Freeze, then dump.** When a taker connects, the old server freezes every pane's cgroup
+   (Phase 2). Now nothing can write to a pty while we work, so the scrollback dump and the
+   pane-to-descriptor correlation describe one consistent instant rather than a moving target.
+   This is the piece that makes a *separate-process* handover as trustworthy as `execve`.
+5. **Hand over.** Manifest and descriptors go across the socket. The new server adopts them with
+   the primitives from §11 (`adopt_terminal`), resurrects the layout, thaws the cgroups, and
+   acknowledges.
+6. **The old server steps aside** only after the acknowledgement, unlinking its socket. Before the
+   ack it can still abort and simply thaw - which is the rollback the `execve` route cannot offer.
+
+### What this buys over `execve`
+
+* It crosses contract versions, because the handover protocol is not the contract.
+* It is rollback-safe: nothing is irreversible until the ack.
+* It needs no signal, so it is safe to attempt against any server that advertises - and a server
+  that does not advertise is simply one that predates this, and is left alone.
+
+### What it costs
+
+* The adopted children are not the new server's children, so their exit status is unobtainable
+  (§6). `RestartPolicy::OnFailure` degrades to "restart on any exit" for adopted panes.
+* The pid changes, so a `systemd` unit tracking `MainPID` needs `sd_notify MAINPID=` or a restart.
+* Two processes exist briefly, so the freeze in step 4 is not optional - without it the dump and
+  the descriptors could disagree.
+
+### The honest limit
+
+This only helps from the version that ships it onward: a server has to already know how to offer
+itself. Sessions stranded by *earlier* versions stay stranded, and can only be picked up by the
+binary that started them. There is no way around that, and pretending otherwise would mean
+signalling processes that would die of it.
