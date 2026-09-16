@@ -6155,6 +6155,7 @@ Config {
         nested_session_handling: None,
         dangerously_enable_paste_buffer_read: None,
         auto_freeze_after: None,
+        park_inactive_clients_after: None,
     },
     themes: {
         "other-theme-from-config": Theme {

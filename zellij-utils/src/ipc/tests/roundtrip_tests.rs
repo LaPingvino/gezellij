@@ -456,6 +456,7 @@ fn test_client_messages() {
             configuration_options: Some(Options {
                 // Gezellij: config-file only, never travels over the protocol
                 auto_freeze_after: None,
+                park_inactive_clients_after: None,
                 simplified_ui: Some(true),
                 theme: Some("theme".to_owned()),
                 theme_dark: Some("theme_dark".to_owned()),

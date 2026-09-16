@@ -1755,8 +1755,22 @@ pub(crate) fn route_action(
                     cli_client_id.unwrap_or(client_id), // we prefer the cli client here because
                     // this is a cli query and we want to print
                     // it there
+                    // Gezellij: ...but the `*` marker is about the client the command is
+                    // attributed to, which for a cli action is the human who typed it
+                    Some(client_id),
                     Some(NotificationEnd::new(completion_tx)),
                 ))
+                .with_context(err_context)?;
+        },
+        // Gezellij: disconnect one named client. See GEZELLIJ_CLIENTS.md.
+        Action::KickClient(client_id_to_kick) => {
+            senders
+                .send_to_server(ServerInstruction::KickClient {
+                    client_id_to_kick,
+                    requesting_client: client_id,
+                    reply_to_client: cli_client_id.unwrap_or(client_id),
+                    completion_tx: Some(NotificationEnd::new(completion_tx)),
+                })
                 .with_context(err_context)?;
         },
         Action::ListPanes {
@@ -2335,6 +2349,24 @@ pub(crate) fn route_thread_main(
                                 .unwrap()
                                 .set_last_active_client(client_id);
 
+                            // Gezellij: any key proves a human is at this client. If it was
+                            // parked (see `client_activity`), this keypress is its ticket back
+                            // to the tab it left — and nothing else. We deliberately swallow it
+                            // rather than forwarding: the documented gesture is ENTER, and
+                            // delivering an ENTER into the shell they come back to would run
+                            // whatever is on the command line.
+                            crate::client_activity::record_input(client_id);
+                            if crate::client_activity::is_parked(client_id) {
+                                if let Some(senders) =
+                                    session_data.read().unwrap().as_ref().map(|s| s.senders.clone())
+                                {
+                                    let _ = senders.send_to_screen(
+                                        ScreenInstruction::UnparkClient(client_id),
+                                    );
+                                }
+                                return Ok(should_break);
+                            }
+
                             // The read guard ends as a temporary in this expression so
                             // `route_action` runs without holding `session_data.read()` —
                             // see the doc comment on `route_action` for why this matters.
@@ -2431,6 +2463,27 @@ pub(crate) fn route_thread_main(
                             } else {
                                 maybe_client_id.unwrap_or(client_id)
                             };
+
+                            // Gezellij: a real client's action (a mouse click, a scroll, the
+                            // on_force_close action a client sends when it is signalled) is
+                            // presence too - only CLI actions are not, since those can come from
+                            // a cron job and are attributed to the last active client rather than
+                            // to their sender.
+                            //
+                            // Unlike the key path below, the action is then routed as usual: some
+                            // of these carry meaning we must not drop (detaching on SIGTERM being
+                            // the one that bites), and none of them are the blind ENTER that the
+                            // key path is protecting you from.
+                            if !is_cli_client {
+                                crate::client_activity::record_input(client_id);
+                                if crate::client_activity::is_parked(client_id) {
+                                    if let Some(ref senders) = senders {
+                                        let _ = senders.send_to_screen(
+                                            ScreenInstruction::UnparkClient(client_id),
+                                        );
+                                    }
+                                }
+                            }
 
                             // Send user input to plugin thread for logging
                             if let Some(ref senders) = senders {

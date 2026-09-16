@@ -54,6 +54,9 @@ const ENABLE_BRACKETED_PASTE: &str = "\u{1b}[?2004h";
 const ENABLE_FOCUS_REPORTING: &str = "\u{1b}[?1004h";
 const DISABLE_FOCUS_REPORTING: &str = "\u{1b}[?1004l";
 const RESET_STYLE: &str = "\u{1b}[m";
+/// Gezellij: how long a signalled client waits for its polite shutdown before exiting anyway.
+/// Generous enough that a healthy client always leaves through the front door.
+const FORCE_QUIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 const SHOW_CURSOR: &str = "\u{1b}[?25h";
 const ENTER_KITTY_KEYBOARD_MODE: &str = "\u{1b}[>1u";
 const EXIT_KITTY_KEYBOARD_MODE: &str = "\u{1b}[<1u";
@@ -1396,6 +1399,38 @@ pub fn start_client(
                                 client_id: None,
                                 is_cli_client: false,
                             });
+                            // Gezellij: and make sure we actually go.
+                            //
+                            // The line above is the whole of the upstream signal handling: it
+                            // asks the server to detach us and trusts the main loop to wind
+                            // down when the server's `Exit` comes back. That works right up
+                            // until the terminal on the other end of our pty has gone away
+                            // (the laptop closed its lid, the ssh session died, the machine
+                            // rebooted). Then the pty's buffer fills, the main thread blocks
+                            // forever inside a `write_all` to stdout, and the process sits in
+                            // `Sl+` on a pty nobody is reading - detached from the session, so
+                            // invisible to `list-clients`, and only removable with SIGKILL.
+                            //
+                            // That is exactly the client this fork's `kick-client` exists to
+                            // get rid of, so it had better be able to die of its own accord.
+                            // We were asked to terminate; after a grace period long enough for
+                            // the polite path to finish, we terminate.
+                            let _ = std::thread::Builder::new()
+                                .name("force_quit".to_string())
+                                .spawn({
+                                    let os_api = os_api.clone();
+                                    move || {
+                                        std::thread::sleep(FORCE_QUIT_GRACE);
+                                        log::warn!(
+                                            "client did not shut down {}s after being signalled \
+                                             (stdout is probably blocked); exiting anyway",
+                                            FORCE_QUIT_GRACE.as_secs()
+                                        );
+                                        let _ = os_api.unset_raw_mode();
+                                        os_api.restore_console_mode();
+                                        std::process::exit(0);
+                                    }
+                                });
                         }
                     }),
                     Some(resize_receiver),

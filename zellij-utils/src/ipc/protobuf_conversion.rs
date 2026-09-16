@@ -1026,6 +1026,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
             // Gezellij: `auto_freeze_after` is a configuration-file option only; it is read by
             // the server from its own config and never travels over the client protocol.
             auto_freeze_after: None,
+            park_inactive_clients_after: None,
             simplified_ui: options.simplified_ui,
             theme: options.theme,
             theme_dark: options.theme_dark,
@@ -1211,6 +1212,7 @@ impl From<crate::input::actions::Action>
             HalfPageScrollUpByPaneIdAction,
             HideFloatingPanesAction,
             KeybindPipeAction,
+            KickClientAction,
             LaunchOrFocusPluginAction,
             LaunchPluginAction,
             ListClientsAction,
@@ -2010,6 +2012,12 @@ impl From<crate::input::actions::Action>
             }),
             crate::input::actions::Action::ListClients => {
                 ActionType::ListClients(ListClientsAction {})
+            },
+            // Gezellij
+            crate::input::actions::Action::KickClient(client_id) => {
+                ActionType::KickClient(KickClientAction {
+                    client_id: client_id as u32,
+                })
             },
             crate::input::actions::Action::ListPanes {
                 show_tab,
@@ -2919,6 +2927,10 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                 })
             },
             ActionType::ListClients(_) => Ok(crate::input::actions::Action::ListClients),
+            // Gezellij
+            ActionType::KickClient(payload) => Ok(crate::input::actions::Action::KickClient(
+                payload.client_id as u16,
+            )),
             ActionType::ListPanes(list_panes_action) => {
                 Ok(crate::input::actions::Action::ListPanes {
                     show_tab: list_panes_action.show_tab,

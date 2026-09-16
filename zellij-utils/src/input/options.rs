@@ -435,6 +435,16 @@ pub struct Options {
     #[clap(skip)]
     #[serde(default, with = "humantime_serde_option")]
     pub auto_freeze_after: Option<std::time::Duration>,
+
+    /// Gezellij: move a client that has sent no input for this long onto a "parked" tab of its
+    /// own, so it stops capping the size of the tab everybody else is looking at. Any input from
+    /// a parked client puts it straight back where it was. Off when unset.
+    ///
+    /// Configuration-file only (`park_inactive_clients_after "10m"`), parsed with humantime;
+    /// there is deliberately no CLI flag for it.
+    #[clap(skip)]
+    #[serde(default, with = "humantime_serde_option")]
+    pub park_inactive_clients_after: Option<std::time::Duration>,
 }
 
 /// Serialize `Option<Duration>` as a humantime string (`"10m"`), so a serialized `Options` keeps
@@ -643,6 +653,9 @@ impl Options {
             .dangerously_enable_paste_buffer_read
             .or(self.dangerously_enable_paste_buffer_read);
         let auto_freeze_after = other.auto_freeze_after.or(self.auto_freeze_after);
+        let park_inactive_clients_after = other
+            .park_inactive_clients_after
+            .or(self.park_inactive_clients_after);
 
         Options {
             simplified_ui,
@@ -705,6 +718,7 @@ impl Options {
             nested_session_handling,
             dangerously_enable_paste_buffer_read,
             auto_freeze_after,
+            park_inactive_clients_after,
         }
     }
 
@@ -816,6 +830,9 @@ impl Options {
             .dangerously_enable_paste_buffer_read
             .or(self.dangerously_enable_paste_buffer_read);
         let auto_freeze_after = other.auto_freeze_after.or(self.auto_freeze_after);
+        let park_inactive_clients_after = other
+            .park_inactive_clients_after
+            .or(self.park_inactive_clients_after);
 
         Options {
             simplified_ui,
@@ -878,6 +895,7 @@ impl Options {
             nested_session_handling,
             dangerously_enable_paste_buffer_read,
             auto_freeze_after,
+            park_inactive_clients_after,
         }
     }
 

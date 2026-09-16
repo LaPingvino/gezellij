@@ -289,6 +289,8 @@ message Action {
     ScrollToNextPromptAction scroll_to_next_prompt = 149;
     SelectCommandAtScrollPositionAction select_command_at_scroll_position = 150;
     CopyLastCommandOutputAction copy_last_command_output = 151;
+    // Gezellij
+    KickClientAction kick_client = 152;
   }
 }
 
@@ -378,6 +380,8 @@ message BreakPaneAction {}
 message BreakPaneRightAction {}
 message BreakPaneLeftAction {}
 message ListClientsAction {}
+// Gezellij: disconnect one named client (`zellij action kick-client <CLIENT_ID>`)
+message KickClientAction { uint32 client_id = 1; }
 message ListPanesAction {
   bool show_tab = 1;
   bool show_command = 2;

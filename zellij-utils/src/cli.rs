@@ -1627,6 +1627,15 @@ tail -f /tmp/my-live-logfile | zellij action pipe --name logs --plugin https://e
         plugin_title: Option<String>,
     },
     ListClients,
+    /// Gezellij: disconnect one client from this session by its id
+    ///
+    /// Use `zellij action list-clients` to find the id. Refuses to kick the client you are
+    /// issuing the command from - that is what `zellij action detach` is for.
+    KickClient {
+        /// The CLIENT_ID as shown by `zellij action list-clients`
+        #[clap(value_parser)]
+        client_id: u16,
+    },
     /// List all panes in the current session
     ///
     /// Returns: Formatted list of panes (table or JSON) to stdout

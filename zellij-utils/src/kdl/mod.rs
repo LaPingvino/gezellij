@@ -3004,6 +3004,22 @@ impl Options {
                 },
                 None => None,
             };
+        // Gezellij: `park_inactive_clients_after "10m"` - a humantime duration, config-file only
+        let park_inactive_clients_after = match kdl_property_first_arg_as_string_or_error!(
+            kdl_options,
+            "park_inactive_clients_after"
+        ) {
+            Some((value, entry)) => match humantime::parse_duration(value) {
+                Ok(duration) => Some(duration),
+                Err(e) => {
+                    return Err(kdl_parsing_error!(
+                        format!("Invalid park_inactive_clients_after '{}': {}", value, e),
+                        entry
+                    ))
+                },
+            },
+            None => None,
+        };
 
         Ok(Options {
             simplified_ui,
@@ -3066,6 +3082,7 @@ impl Options {
             nested_session_handling,
             dangerously_enable_paste_buffer_read,
             auto_freeze_after,
+            park_inactive_clients_after,
         })
     }
     pub fn from_string(stringified_keybindings: &String) -> Result<Self, ConfigError> {
@@ -4778,6 +4795,14 @@ impl Options {
         node.push(humantime::format_duration(duration).to_string());
         Some(node)
     }
+    /// Gezellij: `park_inactive_clients_after "10m"`. Only emitted when set - the feature is off
+    /// by default.
+    fn park_inactive_clients_after_to_kdl(&self, _add_comments: bool) -> Option<KdlNode> {
+        let duration = self.park_inactive_clients_after?;
+        let mut node = KdlNode::new("park_inactive_clients_after");
+        node.push(humantime::format_duration(duration).to_string());
+        Some(node)
+    }
     fn client_async_worker_tasks_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = r#"
 // Number of async worker tasks to spawn per active client.
@@ -4992,6 +5017,11 @@ impl Options {
         }
         if let Some(auto_freeze_after) = self.auto_freeze_after_to_kdl(add_comments) {
             nodes.push(auto_freeze_after);
+        }
+        if let Some(park_inactive_clients_after) =
+            self.park_inactive_clients_after_to_kdl(add_comments)
+        {
+            nodes.push(park_inactive_clients_after);
         }
         if let Some(nested_session_handling) = self.nested_session_handling_to_kdl(add_comments) {
             nodes.push(nested_session_handling);
@@ -7878,6 +7908,57 @@ fn auto_freeze_after_is_parsed_and_roundtrips() {
     let mut fake_document = KdlDocument::new();
     fake_document.nodes_mut().append(&mut serialized);
     assert!(!fake_document.to_string().contains("auto_freeze_after"));
+}
+
+#[test]
+fn park_inactive_clients_after_is_parsed_and_roundtrips() {
+    // Gezellij: opt-in parking of inactive clients, a humantime duration in the config file
+    let document: KdlDocument = r##"
+        park_inactive_clients_after "10m"
+    "##
+    .parse()
+    .unwrap();
+    let options = Options::from_kdl(&document).unwrap();
+    assert_eq!(
+        options.park_inactive_clients_after,
+        Some(std::time::Duration::from_secs(600))
+    );
+
+    let mut serialized = Options::to_kdl(&options, false);
+    let mut fake_document = KdlDocument::new();
+    fake_document.nodes_mut().append(&mut serialized);
+    let serialized = fake_document.to_string();
+    assert!(
+        serialized.contains("park_inactive_clients_after \"10m\""),
+        "expected park_inactive_clients_after in {}",
+        serialized
+    );
+    let reparsed = Options::from_kdl(&serialized.parse::<KdlDocument>().unwrap()).unwrap();
+    assert_eq!(
+        reparsed.park_inactive_clients_after,
+        options.park_inactive_clients_after
+    );
+
+    // unset by default, and not emitted at all then
+    let empty: KdlDocument = "".parse().unwrap();
+    let options = Options::from_kdl(&empty).unwrap();
+    assert_eq!(options.park_inactive_clients_after, None);
+    let mut serialized = Options::to_kdl(&options, true);
+    let mut fake_document = KdlDocument::new();
+    fake_document.nodes_mut().append(&mut serialized);
+    assert!(!fake_document
+        .to_string()
+        .contains("park_inactive_clients_after"));
+}
+
+#[test]
+fn park_inactive_clients_after_rejects_nonsense() {
+    let document: KdlDocument = r##"
+        park_inactive_clients_after "eventually"
+    "##
+    .parse()
+    .unwrap();
+    assert!(Options::from_kdl(&document).is_err());
 }
 
 #[test]

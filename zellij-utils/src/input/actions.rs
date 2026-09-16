@@ -593,6 +593,10 @@ pub enum Action {
         pane_title: Option<String>,
     },
     ListClients,
+    /// Gezellij: disconnect one client by id (see `zellij action list-clients`). Unlike
+    /// `Detach`, this is aimed at somebody else - typically a client whose machine went away
+    /// and which is still capping the size of a tab you are looking at.
+    KickClient(u16),
     ListPanes {
         show_tab: bool,
         show_command: bool,
@@ -1979,6 +1983,7 @@ impl Action {
                 }])
             },
             CliAction::ListClients => Ok(vec![Action::ListClients]),
+            CliAction::KickClient { client_id } => Ok(vec![Action::KickClient(client_id)]),
             CliAction::ListPanes {
                 tab,
                 command,

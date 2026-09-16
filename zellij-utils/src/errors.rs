@@ -304,6 +304,9 @@ pub enum ScreenContext {
     SwitchTabPrev,
     CloseTab,
     GoToTab,
+    /// Gezellij: opt-in parking of inactive clients (see `zellij-server/src/client_activity.rs`)
+    ParkInactiveClients,
+    UnparkClient,
     GoToTabName,
     UpdateTabName,
     UndoRenameTab,
@@ -618,6 +621,8 @@ pub enum ServerContext {
     CliPipeOutput,
     AssociatePipeWithClient,
     DisconnectAllClientsExcept,
+    /// Gezellij: `zellij action kick-client`
+    KickClient,
     ChangeMode,
     ChangeModeForAllClients,
     Reconfigure,

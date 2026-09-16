@@ -26,6 +26,24 @@ pub struct SessionLayoutMetadata {
     /// Gezellij: set when this snapshot was taken to perform an in-place server upgrade rather
     /// than a routine save; the pty thread then execs the new binary instead of writing to disk.
     pub upgrade_requested: bool,
+    /// Gezellij: per-client presence, for `zellij action list-clients`. Filled in by `Screen`
+    /// (the authority on client sizes - it is the very map `recompute_tab_size` minimises over,
+    /// so the listing explains sizing rather than merely describing it) and only for the
+    /// list-clients path; every other consumer of this struct leaves it empty.
+    pub client_presence: BTreeMap<ClientId, ClientPresence>,
+    /// Gezellij: which client asked for the listing, so it can be marked in the output.
+    pub requesting_client: Option<ClientId>,
+}
+
+/// Gezellij: what `list-clients` knows about one client beyond which pane it is focused on.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ClientPresence {
+    /// The client's terminal size, as `Screen` has it.
+    pub size: Option<zellij_utils::pane_size::Size>,
+    /// How long since this client last sent any input. `None` if we never saw it attach.
+    pub idle_for: Option<std::time::Duration>,
+    /// Whether this client is currently parked (see `crate::client_activity`).
+    pub is_parked: bool,
 }
 
 /// Gezellij: helpers for the in-place server upgrade (see `zellij_utils::host_fabric::upgrade`).
@@ -174,7 +192,12 @@ impl SessionLayoutMetadata {
             }
         }
 
-        ClientMetadata::render_many(clients_metadata, &self.default_editor)
+        ClientMetadata::render_many(
+            clients_metadata,
+            &self.default_editor,
+            &self.client_presence,
+            self.requesting_client,
+        )
     }
     pub fn all_clients_metadata(&self) -> BTreeMap<ClientId, ClientMetadata> {
         let mut clients_metadata: BTreeMap<ClientId, ClientMetadata> = BTreeMap::new();
@@ -751,22 +774,69 @@ impl ClientMetadata {
     pub fn get_pane_id(&self) -> PaneId {
         self.pane_id
     }
+    /// Gezellij: `ROWSxCOLS` for the SIZE column.
+    fn stringify_size(presence: Option<&ClientPresence>) -> String {
+        presence
+            .and_then(|presence| presence.size)
+            .map(|size| format!("{}x{}", size.rows, size.cols))
+            .unwrap_or_else(|| "-".to_owned())
+    }
+
+    /// Gezellij: time since this client last sent input, for the IDLE column. A parked client
+    /// says so here - otherwise the listing cannot explain why it is not constraining anything.
+    fn stringify_idle(presence: Option<&ClientPresence>) -> String {
+        let Some(presence) = presence else {
+            return "-".to_owned();
+        };
+        let idle = presence
+            .idle_for
+            .map(crate::client_activity::humanise)
+            .unwrap_or_else(|| "-".to_owned());
+        if presence.is_parked {
+            format!("{} (parked)", idle)
+        } else {
+            idle
+        }
+    }
+
     pub fn render_many(
         clients_metadata: BTreeMap<ClientId, ClientMetadata>,
         default_editor: &Option<PathBuf>,
+        client_presence: &BTreeMap<ClientId, ClientPresence>,
+        requesting_client: Option<ClientId>,
     ) -> String {
         let mut lines = vec![];
-        lines.push(String::from("CLIENT_ID ZELLIJ_PANE_ID RUNNING_COMMAND"));
+        lines.push(String::from(
+            "CLIENT_ID SIZE      IDLE            ZELLIJ_PANE_ID RUNNING_COMMAND",
+        ));
 
         for (client_id, client_metadata) in clients_metadata.iter() {
-            // 9 - CLIENT_ID, 14 - ZELLIJ_PANE_ID, 15 - RUNNING_COMMAND
+            let presence = client_presence.get(client_id);
+            // a `*` marks the client this command is attributed to. A `zellij action` invocation
+            // is its own short-lived client, so the server attributes it to the session's last
+            // active client - the one that most recently typed anything, which right after you
+            // typed this command is you. Absent when there is no such client.
+            let marker = if requesting_client == Some(*client_id) {
+                "*"
+            } else {
+                " "
+            };
+            // 9 - CLIENT_ID (incl. marker), 9 - SIZE, 15 - IDLE, 14 - ZELLIJ_PANE_ID
             lines.push(format!(
-                "{} {} {}",
-                format!("{0: <9}", client_id),
+                "{} {} {} {} {}",
+                format!("{0: <9}", format!("{}{}", client_id, marker)),
+                format!("{0: <9}", Self::stringify_size(presence)),
+                format!("{0: <15}", Self::stringify_idle(presence)),
                 format!("{0: <14}", client_metadata.stringify_pane_id()),
                 format!(
                     "{0: <15}",
-                    client_metadata.stringify_command(default_editor)
+                    // a parked client is looking at Gezellij's own notice pane; printing the
+                    // `printf` that draws it would be accurate and useless
+                    if presence.map(|presence| presence.is_parked).unwrap_or(false) {
+                        "gezellij:parked".to_owned()
+                    } else {
+                        client_metadata.stringify_command(default_editor)
+                    }
                 )
             ));
         }

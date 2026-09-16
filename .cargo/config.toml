@@ -11,3 +11,10 @@ linker = "x86_64-w64-mingw32-gcc"
 
 [build]
 target-dir = "target"
+
+# Gezellij: clap builds its `Command` tree recursively, and `CliAction` is by now large enough
+# that doing so in a debug build overflows the 2 MiB stack the test harness gives a test thread
+# (the real binary parses on the main thread, which has 8 MiB, and is unaffected). Adding a
+# single `CliAction` variant is enough to cross that line, so give test threads room.
+[env]
+RUST_MIN_STACK = { value = "16777216", force = false }

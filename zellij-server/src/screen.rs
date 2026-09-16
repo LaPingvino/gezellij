@@ -82,7 +82,7 @@ use crate::panes::grid::{namespace_notification_id, Osc99PayloadType, PendingNot
 use crate::panes::nested_session_modal::GuestModalShortcuts;
 use crate::panes::terminal_character::AnsiCode;
 use crate::panes::terminal_pane::{BRACKETED_PASTE_BEGIN, BRACKETED_PASTE_END};
-use crate::session_layout_metadata::{PaneLayoutMetadata, SessionLayoutMetadata};
+use crate::session_layout_metadata::{ClientPresence, PaneLayoutMetadata, SessionLayoutMetadata};
 
 use crate::{
     nested_guest::NestedGuestTracker,
@@ -519,6 +519,13 @@ pub enum ScreenInstruction {
     ToggleActiveSyncTab(ClientId, Option<NotificationEnd>),
     CloseTab(ClientId, Option<NotificationEnd>),
     GoToTab(u32, Option<ClientId>, Option<NotificationEnd>), // this Option is a hacky workaround, please do not copy this behaviour
+    /// Gezellij: periodic tick (1s, only spawned when `park_inactive_clients_after` is set) that
+    /// moves clients which have not shown any sign of life onto the parked tab, so they stop
+    /// capping the size of the tab everybody else is looking at.
+    ParkInactiveClients,
+    /// Gezellij: a parked client sent input - a human is there. Put it straight back on the tab
+    /// it was parked from.
+    UnparkClient(ClientId),
     GoToTabName(
         String,
         Option<TerminalAction>, // default_shell
@@ -778,7 +785,12 @@ pub enum ScreenInstruction {
     ),
     SerializeLayoutForResurrection,
     RenameSession(String, ClientId, Option<NotificationEnd>), // String -> new name
-    ListClientsMetadata(Option<PathBuf>, ClientId, Option<NotificationEnd>), // Option<PathBuf> - default shell
+    ListClientsMetadata(
+        Option<PathBuf>,  // default shell
+        ClientId,         // client to print the answer to (the cli client, usually)
+        Option<ClientId>, // Gezellij: the client the command is attributed to, marked with a `*`
+        Option<NotificationEnd>,
+    ),
     ListPanes {
         show_all: bool,
         response_channel: crossbeam::channel::Sender<ListPanesResponse>,
@@ -1084,6 +1096,8 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::SwitchTabPrev(..) => ScreenContext::SwitchTabPrev,
             ScreenInstruction::CloseTab(..) => ScreenContext::CloseTab,
             ScreenInstruction::GoToTab(..) => ScreenContext::GoToTab,
+            ScreenInstruction::ParkInactiveClients => ScreenContext::ParkInactiveClients,
+            ScreenInstruction::UnparkClient(..) => ScreenContext::UnparkClient,
             ScreenInstruction::GoToTabName(..) => ScreenContext::GoToTabName,
             ScreenInstruction::UpdateTabName(..) => ScreenContext::UpdateTabName,
             ScreenInstruction::UndoRenameTab(..) => ScreenContext::UndoRenameTab,
@@ -1544,6 +1558,8 @@ pub(crate) struct Screen {
     /// The indices of this [`Screen`]'s active [`Tab`]s.
     active_tab_ids: BTreeMap<ClientId, usize>,
     client_sizes: HashMap<ClientId, Size>,
+    /// Gezellij: the id of the lazily-created "parked" tab, while it exists.
+    parked_tab_id: Option<usize>,
     global_last_active_tab_id: usize,
     tab_history: BTreeMap<ClientId, Vec<usize>>,
     pane_history: BTreeMap<ClientId, Vec<PaneId>>,
@@ -1690,6 +1706,50 @@ const SERVER_FORWARD_TIMEOUT_MS: u64 = 1000;
 
 const SERVER_CLIPBOARD_FORWARD_TIMEOUT_MS: u64 = 35_000;
 
+/// Gezellij: the name of the tab inactive clients are parked on. Deliberately boring and
+/// lowercase - it shows up in everybody's tab bar while it exists.
+pub(crate) const PARKED_TAB_NAME: &str = "parked";
+
+/// Gezellij: the single-pane layout of the parked tab.
+///
+/// It is a held command pane running one `printf` - no plugin, no lingering process, no new
+/// machinery. The command exits immediately and `hold_on_close` keeps the text on screen.
+/// Passing the message as positional arguments to `printf '%s\n' "$@"` means no quoting of the
+/// message can ever turn into shell syntax.
+fn parked_pane_layout(threshold: Duration) -> TiledPaneLayout {
+    let message = [
+        "",
+        "   Parked — this is a coat check, not an error.",
+        "",
+        &format!(
+            "   Nothing has come from this client for {}, so Gezellij moved it here.",
+            crate::client_activity::humanise(threshold)
+        ),
+        "   A tab is only ever as big as the smallest client looking at it, and sitting",
+        "   on a tab of its own is how this client stops shrinking your other screens.",
+        "",
+        "   Press ENTER to pick up exactly where you left off.",
+        "",
+    ];
+    let mut args: Vec<String> = vec![
+        "-c".to_owned(),
+        "printf '%s\\n' \"$@\"".to_owned(),
+        "gezellij-parked".to_owned(),
+    ];
+    args.extend(message.iter().map(|line| line.to_string()));
+    let run_command = RunCommand {
+        command: PathBuf::from("/bin/sh"),
+        args,
+        hold_on_close: true,
+        ..Default::default()
+    };
+    TiledPaneLayout {
+        name: Some(PARKED_TAB_NAME.to_owned()),
+        run: Some(Run::Command(run_command)),
+        ..Default::default()
+    }
+}
+
 impl Screen {
     /// Creates and returns a new [`Screen`].
     pub fn new(
@@ -1755,6 +1815,7 @@ impl Screen {
             connected_clients: Rc::new(RefCell::new(HashMap::new())),
             active_tab_ids: BTreeMap::new(),
             client_sizes: HashMap::new(),
+            parked_tab_id: None,
             global_last_active_tab_id: 0,
             tabs: BTreeMap::new(),
             last_single_pane_tab_names: HashMap::new(),
@@ -2453,6 +2514,195 @@ impl Screen {
             self.recompute_tab_size(tab_id)?;
         }
         Ok(())
+    }
+
+    /// Gezellij: fill in the per-client SIZE/IDLE/parked information for `list-clients`.
+    fn populate_client_presence(
+        &self,
+        session_layout_metadata: &mut SessionLayoutMetadata,
+        requesting_client: Option<ClientId>,
+    ) {
+        let client_ids: Vec<ClientId> = self.connected_clients.borrow().keys().copied().collect();
+        let idle_times = crate::client_activity::idle_for_many(&client_ids);
+        session_layout_metadata.requesting_client = requesting_client;
+        for client_id in client_ids {
+            session_layout_metadata.client_presence.insert(
+                client_id,
+                ClientPresence {
+                    size: self.client_sizes.get(&client_id).copied(),
+                    idle_for: idle_times.get(&client_id).copied(),
+                    is_parked: crate::client_activity::is_parked(client_id),
+                },
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Gezellij: parking inactive clients (opt-in, `park_inactive_clients_after`).
+    //
+    // A tab is sized to the *smallest* client looking at it (see `recompute_tab_size` just
+    // above). That is correct while everyone is watching and wrong the moment somebody walks
+    // away - the phone you attached from this morning keeps capping the desktop you are sitting
+    // at now. The hedge deliberately changes nothing in the sizing code: a client on *another*
+    // tab already constrains nobody, so we simply move an inactive client to a tab of its own
+    // and let the existing, well-tested minimum do the rest.
+    // ---------------------------------------------------------------------------------------
+
+    /// Clients that should be parked right now: idle for longer than `threshold`, and actually
+    /// costing somebody something.
+    ///
+    /// Deliberately conservative - we never park:
+    /// * the only client of the session, or a client that is alone on its tab (it constrains
+    ///   nobody, so there is nothing to fix);
+    /// * a client that is already parked, or is on the parked tab;
+    /// * anybody at all in a mirrored session, where per-client tab focus does not exist.
+    fn clients_to_park(&self, threshold: Duration) -> Vec<ClientId> {
+        if self.session_is_mirrored {
+            return Vec::new();
+        }
+        let parked_tab_id = self.parked_tab_id;
+        let is_active = |client_id: &ClientId| {
+            !crate::client_activity::is_parked(*client_id)
+                // a watcher is read-only, so it could never type its way back out again
+                && !self.watcher_clients.contains_key(client_id)
+                && self
+                    .active_tab_ids
+                    .get(client_id)
+                    .map(|tab_id| Some(*tab_id) != parked_tab_id)
+                    .unwrap_or(false)
+        };
+        let active_clients: Vec<ClientId> = self
+            .active_tab_ids
+            .keys()
+            .copied()
+            .filter(|client_id| is_active(client_id))
+            .collect();
+        if active_clients.len() < 2 {
+            // never park the last client standing
+            return Vec::new();
+        }
+        let idle_times = crate::client_activity::idle_for_many(&active_clients);
+        let mut to_park: Vec<ClientId> = Vec::new();
+        for client_id in &active_clients {
+            let Some(idle_for) = idle_times.get(client_id) else {
+                // we never saw this client attach; do not guess about it
+                continue;
+            };
+            if *idle_for < threshold {
+                continue;
+            }
+            let Some(tab_id) = self.active_tab_ids.get(client_id) else {
+                continue;
+            };
+            // is anybody else (who is not themselves about to be parked) sharing this tab?
+            let shares_tab = active_clients.iter().any(|other_id| {
+                other_id != client_id
+                    && !to_park.contains(other_id)
+                    && self.active_tab_ids.get(other_id) == Some(tab_id)
+            });
+            if !shares_tab {
+                continue;
+            }
+            to_park.push(*client_id);
+        }
+        // never park everybody: leave at least one client unparked overall
+        while !to_park.is_empty() && to_park.len() >= active_clients.len() {
+            to_park.pop();
+        }
+        to_park
+    }
+
+    /// `go_to_tab`, but addressed by the stable tab *id* rather than by position - tabs get
+    /// closed and reordered while somebody is parked.
+    fn go_to_tab_by_id(&mut self, tab_id: usize, client_id: ClientId) -> Result<bool> {
+        let Some(position) = self.tabs.get(&tab_id).map(|tab| tab.position) else {
+            return Ok(false);
+        };
+        self.switch_active_tab(position, None, true, client_id)?;
+        Ok(true)
+    }
+
+    /// Put a parked client back where it came from. Returns the tab id it landed on.
+    ///
+    /// Instant and lossless is the whole promise here: the client returns to the exact tab it
+    /// was parked from, with its pane focus untouched (parking never changed it - it only
+    /// changed which tab this one client is looking at).
+    pub fn unpark_client(&mut self, client_id: ClientId) -> Result<Option<usize>> {
+        let Some(previous_tab_id) = crate::client_activity::unpark(client_id) else {
+            return Ok(None);
+        };
+        let target_tab_id = if self.tabs.contains_key(&previous_tab_id) {
+            previous_tab_id
+        } else {
+            // the tab they were parked from is gone; the first tab that isn't the parked one
+            match self
+                .tabs
+                .keys()
+                .copied()
+                .find(|tab_id| Some(*tab_id) != self.parked_tab_id)
+            {
+                Some(tab_id) => tab_id,
+                None => return Ok(None),
+            }
+        };
+        self.go_to_tab_by_id(target_tab_id, client_id)?;
+        self.close_parked_tab_if_unused()?;
+        Ok(Some(target_tab_id))
+    }
+
+    /// The parked tab is created lazily with the first parked client and goes away again when
+    /// the last one leaves - it should never be lying around as clutter.
+    ///
+    /// Deliberately a no-op while the tab is still being built: creating it goes through the
+    /// pty and plugin threads and only finishes when `ApplyLayout` comes back, so a client that
+    /// un-parks itself within that window would otherwise pull the tab out from under a layout
+    /// on its way in. The next parking tick closes it instead, at most a second later.
+    pub fn close_parked_tab_if_unused(&mut self) -> Result<()> {
+        let Some(parked_tab_id) = self.parked_tab_id else {
+            return Ok(());
+        };
+        if crate::client_activity::parked_client_count() > 0 {
+            return Ok(());
+        }
+        let layout_has_landed = self
+            .tabs
+            .get(&parked_tab_id)
+            .map(|tab| !tab.get_all_pane_ids().is_empty())
+            .unwrap_or(false);
+        if !layout_has_landed && self.tabs.contains_key(&parked_tab_id) {
+            return Ok(());
+        }
+        // don't yank the tab out from under somebody who wandered onto it by hand
+        if self
+            .active_tab_ids
+            .values()
+            .any(|tab_id| *tab_id == parked_tab_id)
+        {
+            return Ok(());
+        }
+        self.parked_tab_id = None;
+        if self.tabs.contains_key(&parked_tab_id) {
+            self.close_tab_by_id(parked_tab_id)?;
+        }
+        Ok(())
+    }
+
+    /// Recompute every tab's size, returning whether any of them actually changed. Used after
+    /// parking/unparking, where the client that moved was constraining a tab it is no longer on.
+    fn recompute_all_tab_sizes(&mut self) -> Result<bool> {
+        let tab_ids: Vec<usize> = self.tabs.keys().copied().collect();
+        let sizes_before: Vec<Size> = tab_ids
+            .iter()
+            .filter_map(|tab_id| self.tabs.get(tab_id).map(|tab| tab.size))
+            .collect();
+        for tab_id in &tab_ids {
+            self.recompute_tab_size(*tab_id)?;
+        }
+        let sizes_after: Vec<Size> = tab_ids
+            .iter()
+            .filter_map(|tab_id| self.tabs.get(tab_id).map(|tab| tab.size))
+            .collect();
+        Ok(sizes_before != sizes_after)
     }
 
     // Only clients viewing the same tab are relevant: fullscreen and tab sizing are per-tab, so a
@@ -5221,6 +5471,13 @@ impl Screen {
             self.push_sixel_host_support_to_tabs();
         }
         self.client_sizes.remove(&client_id);
+        // Gezellij: a parked client that disconnects takes the parked tab with it, if it was the
+        // last one there. (`client_activity::forget` has already dropped it from the parked set
+        // by the time Screen sees RemoveClient, but the server-initiated paths can arrive in
+        // either order, so clear it here too rather than relying on that.)
+        crate::client_activity::forget(client_id);
+        self.close_parked_tab_if_unused()
+            .with_context(err_context)?;
         self.pane_render_subscribers.remove(&client_id);
         self.last_forwarded_osc7.remove(&client_id);
         self.client_host_focused.remove(&client_id);
@@ -8110,6 +8367,8 @@ pub(crate) fn screen_thread_main(
     let serialize_pane_viewport = config_options.serialize_pane_viewport.unwrap_or(false);
     let scrollback_lines_to_serialize = config_options.scrollback_lines_to_serialize;
     let session_is_mirrored = config_options.mirror_session.unwrap_or(false);
+    // Gezellij: opt-in, unset by default. See `client_activity` and `Screen::clients_to_park`.
+    let park_inactive_clients_after = config_options.park_inactive_clients_after;
     let layout_dir = config_options.layout_dir;
     #[cfg(test)]
     let default_shell = config_options
@@ -9090,9 +9349,18 @@ pub(crate) fn screen_thread_main(
                     ))
                     .with_context(err_context)?;
             },
-            ScreenInstruction::ListClientsMetadata(default_shell, client_id, completion_tx) => {
+            ScreenInstruction::ListClientsMetadata(
+                default_shell,
+                client_id,
+                requesting_client,
+                completion_tx,
+            ) => {
                 let err_context = || format!("Failed to dump layout");
-                let session_layout_metadata = screen.get_layout_metadata(default_shell, None);
+                let mut session_layout_metadata = screen.get_layout_metadata(default_shell, None);
+                // Gezellij: the SIZE and IDLE columns. Sizes come from `Screen::client_sizes`
+                // deliberately: it is the same map `recompute_tab_size` takes the minimum of, so
+                // what the listing prints is exactly what is deciding your tab's size.
+                screen.populate_client_presence(&mut session_layout_metadata, requesting_client);
                 screen
                     .bus
                     .senders
@@ -9955,6 +10223,99 @@ pub(crate) fn screen_thread_main(
                             pending_tab_switches.insert((tab_index as usize, client_id));
                         }
                     },
+                }
+            },
+            ScreenInstruction::ParkInactiveClients => {
+                // Gezellij: the 1s tick of `park_inactive_clients_after`. Off unless configured,
+                // in which case background_jobs spawns the ticker.
+                let Some(threshold) = park_inactive_clients_after else {
+                    continue;
+                };
+                // a tab whose layout was still in flight last time round
+                if screen
+                    .parked_tab_id
+                    .map(|tab_id| !pending_tab_ids.contains(&tab_id))
+                    .unwrap_or(false)
+                {
+                    screen.close_parked_tab_if_unused()?;
+                }
+                let to_park = screen.clients_to_park(threshold);
+                let mut parked_anybody = false;
+                for client_id in to_park {
+                    let Some(previous_tab_id) = screen.active_tab_ids.get(&client_id).copied()
+                    else {
+                        continue;
+                    };
+                    let existing_parked_tab = screen
+                        .parked_tab_id
+                        .filter(|tab_id| screen.tabs.contains_key(tab_id));
+                    match existing_parked_tab {
+                        Some(parked_tab_id) => {
+                            if screen.go_to_tab_by_id(parked_tab_id, client_id)? {
+                                crate::client_activity::park(client_id, previous_tab_id);
+                                parked_anybody = true;
+                            }
+                        },
+                        None => {
+                            // create the parked tab lazily, with this client as its first
+                            // (and, for the moment, only) occupant. This mirrors the
+                            // `ScreenInstruction::NewTab` arm above; we inline it rather than
+                            // sending ourselves a NewTab so that we learn the tab id here.
+                            let tab_index = screen.get_new_tab_id();
+                            pending_tab_ids.insert(tab_index);
+                            let swap_layouts = (
+                                screen.default_layout.swap_tiled_layouts.clone(),
+                                screen.default_layout.swap_floating_layouts.clone(),
+                            );
+                            screen.new_tab(
+                                tab_index,
+                                swap_layouts,
+                                Some(PARKED_TAB_NAME.to_owned()),
+                                Some(client_id),
+                            )?;
+                            screen.parked_tab_id = Some(tab_index);
+                            crate::client_activity::park(client_id, previous_tab_id);
+                            parked_anybody = true;
+                            let is_web_client = screen.client_is_web(client_id);
+                            screen
+                                .bus
+                                .senders
+                                .send_to_plugin(PluginInstruction::NewTab(
+                                    None,
+                                    None,
+                                    Some(parked_pane_layout(threshold)),
+                                    vec![],
+                                    tab_index,
+                                    None,
+                                    false,
+                                    true, // move this client (and only this client) there
+                                    (client_id, is_web_client),
+                                    None,
+                                ))?;
+                        },
+                    }
+                    log::info!(
+                        "parked client {} (idle for at least {}) away from tab {}",
+                        client_id,
+                        crate::client_activity::humanise(threshold),
+                        previous_tab_id
+                    );
+                }
+                // Recompute unconditionally while anybody is parked: the tab a client was parked
+                // from only stops being constrained once the focus change has actually landed,
+                // which for the lazily-created tab happens asynchronously in ApplyLayout.
+                if parked_anybody || crate::client_activity::parked_client_count() > 0 {
+                    if screen.recompute_all_tab_sizes()? || parked_anybody {
+                        screen.log_and_report_session_state().non_fatal();
+                        screen.render(None)?;
+                    }
+                }
+            },
+            ScreenInstruction::UnparkClient(client_id) => {
+                if screen.unpark_client(client_id)?.is_some() {
+                    screen.recompute_all_tab_sizes()?;
+                    screen.log_and_report_session_state().non_fatal();
+                    screen.render(None)?;
                 }
             },
             ScreenInstruction::GoToTabName(

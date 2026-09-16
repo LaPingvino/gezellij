@@ -44,6 +44,9 @@ ALL_TESTS=(
     upgrade_failure_is_safe
     net_addresses
     systemd_unit_export
+    client_sizes_and_kick
+    client_parking
+    signalled_client_exits
 )
 
 while [ $# -gt 0 ]; do
@@ -650,6 +653,303 @@ test_systemd_unit_export() {
                  "the unit has no After=default.target"
 
     remove_service_quietly "$name"
+}
+
+# ---------------------------------------------------------------------------
+# client helpers (multi-client tab sizing -- see GEZELLIJ_CLIENTS.md)
+#
+# These tests need several clients attached at once on terminals of *different sizes*, which
+# means real ptys with a winsize we choose. `script` inherits its size from its own stdin, so
+# it is no use here; a ten line python helper that sets TIOCSWINSZ in the child before exec is.
+# ---------------------------------------------------------------------------
+
+PTY_HELPER="$ROOT/tmp/pty_client.py"
+GHOST_HELPER="$ROOT/tmp/pty_ghost.py"
+
+write_pty_helpers() {
+    [ -f "$PTY_HELPER" ] && return 0
+    cat > "$PTY_HELPER" <<'PY'
+# pty_client.py ROWS COLS PIDFILE OUTFILE FIFO -- cmd args...
+# Runs cmd on a pty of exactly ROWS x COLS, records its pid, drains everything it prints into
+# OUTFILE, and types anything that appears on FIFO into it.
+import fcntl, os, pty, select, struct, sys, termios
+rows, cols = int(sys.argv[1]), int(sys.argv[2])
+pidfile, outfile, fifo = sys.argv[3], sys.argv[4], sys.argv[5]
+assert sys.argv[6] == "--"
+cmd = sys.argv[7:]
+pid, fd = pty.fork()
+if pid == 0:
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    os.execvp(cmd[0], cmd)
+    os._exit(127)
+with open(pidfile, "w") as f:
+    f.write(str(pid))
+fifo_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+keepalive = os.open(fifo, os.O_WRONLY)  # so the fifo never reports EOF between keystrokes
+out = open(outfile, "wb", buffering=0)
+while True:
+    try:
+        ready, _, _ = select.select([fd, fifo_fd], [], [], 0.2)
+    except OSError:
+        break
+    if fd in ready:
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        out.write(data)
+    if fifo_fd in ready:
+        try:
+            keys = os.read(fifo_fd, 4096)
+        except OSError:
+            keys = b""
+        if keys:
+            os.write(fd, keys)
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            break
+    except ChildProcessError:
+        break
+PY
+    cat > "$GHOST_HELPER" <<'PY'
+# pty_ghost.py ROWS COLS PIDFILE DRAIN_SECONDS -- cmd args...
+# Like pty_client.py, but stops reading the pty after DRAIN_SECONDS and never reads it again.
+# That is what a client whose terminal emulator went away looks like from the inside: its pty
+# buffer fills and any further write to stdout blocks forever.
+import fcntl, os, pty, struct, sys, termios, time
+rows, cols, pidfile, drain = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+assert sys.argv[5] == "--"
+cmd = sys.argv[6:]
+pid, fd = pty.fork()
+if pid == 0:
+    fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    os.execvp(cmd[0], cmd)
+    os._exit(127)
+with open(pidfile, "w") as f:
+    f.write(str(pid))
+deadline = time.time() + drain
+while time.time() < deadline:
+    try:
+        if not os.read(fd, 65536):
+            break
+    except OSError:
+        break
+time.sleep(600)
+PY
+    return 0
+}
+
+# attach_client <tag> <rows> <cols> <session> -- attaches a client, returns once the server
+# lists it. Sets CLIENT_PID. Keystrokes go to "$ROOT/tmp/<tag>.fifo".
+CLIENT_PID=""
+attach_client() {
+    local tag=$1 rows=$2 cols=$3 session=$4
+    local fifo="$ROOT/tmp/$tag.fifo" pidfile="$ROOT/tmp/$tag.pid" before
+    before=$(client_count "$session")
+    rm -f "$fifo" "$pidfile"
+    mkfifo "$fifo" || return 1
+    python3 "$PTY_HELPER" "$rows" "$cols" "$pidfile" "$ROOT/tmp/$tag.out" "$fifo" \
+            -- "$BINARY" attach "$session" >/dev/null 2>&1 &
+    # a debug-build client takes its time over the terminal handshake
+    wait_for "[ -s '$pidfile' ]" 15 || return 1
+    CLIENT_PID=$(cat "$pidfile")
+    # wait for *this* client, not merely for some client: the session may already have others
+    wait_for "[ \"\$(client_count '$session')\" -gt $before ]" 40 || return 1
+    return 0
+}
+
+# type_at <tag> <string> -- send keystrokes to one attached client
+type_at() { printf '%s' "$2" > "$ROOT/tmp/$1.fifo"; }
+
+# client_count <session>
+client_count() { z --session "$1" action list-clients 2>/dev/null | tail -n +2 | grep -c . ; }
+
+# client_line <session> <client_id>
+client_line() { z --session "$1" action list-clients 2>/dev/null | awk -v id="$2" '$1 == id || $1 == id"*"'; }
+
+# Client ids are assigned (and recycled) by the server, so a test must never assume that the
+# first client it attached is client 1. Look them up by the one thing we do control: their size.
+# client_line_by_size <session> <ROWSxCOLS> / client_id_by_size <session> <ROWSxCOLS>
+client_line_by_size() { z --session "$1" action list-clients 2>/dev/null | awk -v s="$2" '$2 == s'; }
+client_id_by_size() { client_line_by_size "$1" "$2" | awk '{gsub(/\*/, "", $1); print $1}'; }
+
+# pane_rows <session> <pane_id> -- ROWS as reported by `list-panes --geometry`
+pane_rows() { z --session "$1" action list-panes --geometry 2>/dev/null | awk -v p="$2" '$1 == p {print $(NF-1)}'; }
+pane_cols() { z --session "$1" action list-panes --geometry 2>/dev/null | awk -v p="$2" '$1 == p {print $NF}'; }
+
+kill_client_quietly() {
+    local pid=$1
+    [ -n "$pid" ] || return 0
+    kill -9 "$pid" >/dev/null 2>&1
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 9. client_sizes_and_kick
+#
+# The incident GEZELLIJ_CLIENTS.md is about: a second client on a smaller terminal silently
+# caps the tab for everybody. `list-clients` must show who and how small, and `kick-client`
+# must give the tab back.
+# ---------------------------------------------------------------------------
+
+test_client_sizes_and_kick() {
+    local session=e2eclients big small out small_id
+    write_pty_helpers
+    track_session "$session"
+    kill_session_quietly "$session"
+
+    z attach --create-background "$session" --restart no -- sleep 100000 >/dev/null 2>&1
+    wait_for "session_listed '$session'" 20 || { fail "session $session started"; return; }
+
+    attach_client big 60 200 "$session" || { fail "big client attached"; return; }
+    big=$CLIENT_PID
+    assert_eq "$(pane_rows "$session" terminal_0)" "58" "one 60x200 client: the pane is 58 rows"
+
+    attach_client small 20 80 "$session" || { fail "small client attached"; kill_client_quietly "$big"; return; }
+    small=$CLIENT_PID
+    wait_for "[ \"\$(pane_rows '$session' terminal_0)\" = 18 ]" 15
+    assert_eq "$(pane_rows "$session" terminal_0)" "18" \
+              "a second, smaller client shrinks the tab for everybody (the incident)"
+
+    out=$(z --session "$session" action list-clients 2>&1)
+    assert_contains "$out" "SIZE" "list-clients has a SIZE column"
+    assert_contains "$out" "IDLE" "list-clients has an IDLE column"
+    assert_true "[ -n \"\$(client_id_by_size '$session' 60x200)\" ]" \
+                "the big client is listed at 60x200"
+    small_id=$(client_id_by_size "$session" 20x80)
+    assert_true "[ -n \"\$small_id\" ]" "the small client is listed at 20x80"
+    assert_match "$(client_line_by_size "$session" 20x80)" "[0-9]+[smhd]" \
+                 "the small client has an idle time"
+
+    out=$(z --session "$session" action kick-client 99 2>&1)
+    assert_contains "$out" "No client with id 99" "kicking an unknown id says so"
+
+    # `kick-client` is attributed to the last client that typed, and refuses to kick it
+    type_at big 'x'
+    sleep 1
+    out=$(z --session "$session" action kick-client "$(client_id_by_size "$session" 60x200)" 2>&1)
+    assert_contains "$out" "Refusing to kick client" "kick-client refuses to kick you"
+    assert_eq "$(client_count "$session")" "2" "...and nobody was disconnected by that"
+
+    out=$(z --session "$session" action kick-client "$small_id" 2>&1)
+    assert_contains "$out" "Disconnected client $small_id" "kick-client reports the disconnect"
+    wait_for "[ \"\$(client_count '$session')\" = 1 ]" 15
+    assert_eq "$(client_count "$session")" "1" "the kicked client is gone from list-clients"
+    wait_for "[ \"\$(pane_rows '$session' terminal_0)\" = 58 ]" 15
+    assert_eq "$(pane_rows "$session" terminal_0)" "58" "the tab grows back after the kick"
+    wait_for "[ ! -d /proc/$small ]" 15
+    assert_false "[ -d /proc/$small ]" "the kicked client's own process exits"
+
+    kill_client_quietly "$big"
+    kill_session_quietly "$session"
+}
+
+# ---------------------------------------------------------------------------
+# 10. client_parking
+#
+# `park_inactive_clients_after`: the idle client steps aside on its own, and one keypress
+# brings it straight back to the tab it was on.
+# ---------------------------------------------------------------------------
+
+test_client_parking() {
+    local session=e2epark big small conf i
+    write_pty_helpers
+    track_session "$session"
+    kill_session_quietly "$session"
+
+    conf="$ROOT/tmp/park.kdl"
+    cat > "$conf" <<'EOF'
+park_inactive_clients_after "5s"
+EOF
+
+    z --config "$conf" attach --create-background "$session" --restart no -- sleep 100000 >/dev/null 2>&1
+    wait_for "session_listed '$session'" 20 || { fail "session $session started"; return; }
+
+    attach_client big 60 200 "$session" || { fail "big client attached"; return; }
+    big=$CLIENT_PID
+    attach_client small 20 80 "$session" || { fail "small client attached"; kill_client_quietly "$big"; return; }
+    small=$CLIENT_PID
+
+    wait_for "[ \"\$(pane_rows '$session' terminal_0)\" = 18 ]" 15
+    assert_eq "$(pane_rows "$session" terminal_0)" "18" "both clients attached: the tab is capped at 20x80"
+
+    # Keep the big client demonstrably present while the small one goes quiet.
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        type_at big ' '
+        sleep 1
+        [ "$(pane_rows "$session" terminal_0)" = "58" ] && break
+    done
+
+    assert_eq "$(pane_rows "$session" terminal_0)" "58" \
+              "the idle client is parked and the tab grows back on its own"
+    assert_eq "$(client_count "$session")" "2" "parking disconnects nobody"
+    assert_match "$(client_line_by_size "$session" 20x80)" "parked" \
+                 "list-clients says the small client is parked"
+    assert_contains "$(z --session "$session" action query-tab-names 2>&1)" "parked" \
+                    "there is a tab called 'parked'"
+
+    # ...and any keypress buys the trip home. (We keep tickling the big client throughout, so
+    # that it does not get parked in turn while we are checking on the small one.)
+    type_at small $'\r'
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        type_at big ' '
+        [ "$(pane_rows "$session" terminal_0)" = "18" ] && break
+        sleep 1
+    done
+    assert_eq "$(pane_rows "$session" terminal_0)" "18" \
+              "one keypress puts the parked client back on its tab"
+    assert_false "printf '%s' \"\$(client_line_by_size '$session' 20x80)\" | grep -q parked" \
+                 "list-clients no longer calls the small client parked"
+    assert_not_contains "$(z --session "$session" action query-tab-names 2>&1)" "parked" \
+                        "the parked tab is cleaned up when the last client leaves it"
+
+    kill_client_quietly "$big"
+    kill_client_quietly "$small"
+    kill_session_quietly "$session"
+}
+
+# ---------------------------------------------------------------------------
+# 11. signalled_client_exits
+#
+# A client whose terminal has gone away blocks forever writing to its pty. Upstream's SIGTERM
+# handling asks the server to detach and then waits for a shutdown that can never arrive, so
+# the process lingers until SIGKILL - invisible to `list-clients`, still holding a pty.
+# ---------------------------------------------------------------------------
+
+test_signalled_client_exits() {
+    local session=e2esignal ghost i
+    write_pty_helpers
+    track_session "$session"
+    kill_session_quietly "$session"
+
+    z attach --create-background "$session" --restart no -- sleep 100000 >/dev/null 2>&1
+    wait_for "session_listed '$session'" 20 || { fail "session $session started"; return; }
+
+    rm -f "$ROOT/tmp/ghost.pid"
+    python3 "$GHOST_HELPER" 40 120 "$ROOT/tmp/ghost.pid" 20 \
+            -- "$BINARY" attach "$session" >/dev/null 2>&1 &
+    wait_for "[ -s '$ROOT/tmp/ghost.pid' ]" 15 || { fail "ghost client started"; return; }
+    ghost=$(cat "$ROOT/tmp/ghost.pid")
+    wait_for "[ \"\$(client_count '$session')\" = 1 ]" 40 || { fail "ghost client attached"; kill_client_quietly "$ghost"; return; }
+
+    # let the helper stop draining, then generate enough output to block the client's stdout
+    sleep 21
+    for i in $(seq 40); do
+        z --session "$session" action write-chars "padding line $i to fill the pty buffer" >/dev/null 2>&1
+    done
+    sleep 2
+    assert_true "[ -d /proc/$ghost ]" "the ghost client is still running before the signal"
+
+    kill -TERM "$ghost"
+    wait_for "[ ! -d /proc/$ghost ] || [ \"\$(awk '{print \$3}' /proc/$ghost/stat 2>/dev/null)\" = Z ]" 20
+    assert_true "[ ! -d /proc/$ghost ] || [ \"\$(awk '{print \$3}' /proc/$ghost/stat 2>/dev/null)\" = Z ]" \
+                "a signalled client exits even with a blocked stdout"
+    assert_eq "$(client_count "$session")" "0" "and it is gone from list-clients"
+
+    kill_client_quietly "$ghost"
+    kill_session_quietly "$session"
 }
 
 # ---------------------------------------------------------------------------

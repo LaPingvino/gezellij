@@ -36,6 +36,9 @@ is used only when stdout is a terminal.
 - **cgroup v2 delegation** for `freeze_thaw`. Under a normal `systemd --user` session this is
   already the case; where it is missing the test skips instead of failing.
 - `bash` (4+), `find`, `pgrep`, `timeout`, `grep -E`.
+- `python3` for the three client tests — they need several clients attached at once on terminals
+  of *different* sizes, which means ptys whose winsize the test chooses. The helpers are written
+  out into the temp root by the suite itself.
 - About 1.5 GB of free space in `$TMPDIR` — two upgrade tests each keep a copy of the binary,
   and a debug build of `zellij` is ~500 MB.
 
@@ -74,6 +77,9 @@ binaries), and removes the root — unless `--keep`, which prints the path inste
 | `upgrade_failure_is_safe` | Same setup but the copy is deleted rather than replaced. `upgrade-server <session> --timeout 10` exits non-zero within ~10 s, prints a reason, and leaves the server pid and the pane's child alive and related. |
 | `net_addresses` | `service net-setup` prints a `/64` prefix inside `fd00::/8`; `service add --bind-ip` prints the service's own address; `service list` shows it; the pane's environment really carries `GEZELLIJ_BIND_ADDR=<that address>`; `service net-export --format caddy` contains the bracketed address. |
 | `systemd_unit_export` | `service export-systemd <name>` emits `Type=simple`, `Restart=on-failure`, an `ExecStart=… service run <name>` line, and no `After=default.target`. |
+| `client_sizes_and_kick` | Two clients on terminals of different sizes (real ptys, sized with `TIOCSWINSZ`): the tab shrinks to the smaller of them — the incident in [GEZELLIJ_CLIENTS.md](../GEZELLIJ_CLIENTS.md) — `list-clients` shows each client's `SIZE` and `IDLE`, `kick-client` refuses an unknown id and refuses to kick you, and kicking the small client makes the tab grow back and that client's process exit. |
+| `client_parking` | With `park_inactive_clients_after "5s"`: the idle small client is moved to a `parked` tab on its own, the tab grows back without anybody being disconnected, `list-clients` says `(parked)`, and one keypress from the parked client puts it straight back on the tab it was on. |
+| `signalled_client_exits` | A client whose pty nobody is draining (a terminal that went away) blocks forever writing to stdout. `SIGTERM` must still get rid of it: it leaves the session *and* its own process exits, without `SIGKILL`. |
 
 ## When tests skip
 

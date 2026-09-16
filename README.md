@@ -12,6 +12,7 @@
 > | **[Live upgrades](GEZELLIJ_UPGRADE.md)** | `zellij upgrade-server --all` — the server replaces itself with the newly installed binary **in place**. Every process in your panes keeps running, same pids. No more losing a day's work to `pacman -Syu`. |
 > | **[Freeze & thaw](GEZELLIJ_FREEZE.md)** | `zellij freeze mywork` — cgroup v2 freezer: a whole session paused in the kernel at 0% CPU, memory intact, thawed instantly. No signals, no root. |
 > | **Networking** | Swap ports for addresses: each service gets its own IPv6 loopback address from a per-installation ULA prefix, so everything can listen on the same port. `service net-setup`, `net-export --format caddy`. |
+> | **[Clients](GEZELLIJ_CLIENTS.md)** | Roam between machines without your phone shrinking your desktop: `list-clients` shows each client's size and idle time, `kick-client` evicts one, and opt-in `park_inactive_clients_after` steps idle clients aside until a keypress brings them back. |
 > | **[Themes](GEZELLIJ_THEMES.md)** | `gezellig-dark` / `gezellig-light`: warm, low-blue-light palettes for long sessions. |
 > | **[Packaging](packaging/README.md)** | An Arch `PKGBUILD` that installs alongside stock Zellij, and a reversible script that makes Gezellij greet you at login instead of byobu/tmux/screen. |
 >

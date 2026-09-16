@@ -2058,6 +2058,7 @@ impl TryFrom<Action> for ProtobufAction {
             | Action::DumpLayout
             | Action::CliPipe { .. }
             | Action::ListClients
+            | Action::KickClient(..)
             | Action::ListPanes { .. }
             | Action::StackPanes { pane_ids: _ }
             | Action::ChangeFloatingPaneCoordinates {

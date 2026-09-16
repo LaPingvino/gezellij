@@ -121,6 +121,8 @@ static FLASH_DURATION_MS: u64 = 400; // Doherty threshold
 static PLUGIN_ANIMATION_OFFSET_DURATION_MD: u64 = 500;
 static SESSION_METADATA_WRITE_INTERVAL_MS: u64 = 1000;
 static UPDATE_AND_REPORT_CWDS_INTERVAL_MS: u64 = 1000;
+/// Gezellij: how often the screen thread is asked to look for clients to park.
+static PARK_CHECK_INTERVAL_MS: u64 = 1000;
 static DEFAULT_SERIALIZATION_INTERVAL: u64 = 60000;
 static REPAINT_DELAY_MS: u64 = 10;
 static HELP_TEXT_DEBOUNCE_DURATION: u64 = 5000;
@@ -145,6 +147,7 @@ pub(crate) fn background_jobs_main(
     serialization_interval: Option<u64>,
     disable_session_metadata: bool,
     web_server_base_url: String,
+    park_inactive_clients: bool,
 ) -> Result<()> {
     let err_context = || "failed to write to pty".to_string();
     let mut running_jobs: HashMap<BackgroundJob, Instant> = HashMap::new();
@@ -190,6 +193,22 @@ pub(crate) fn background_jobs_main(
             loop {
                 ticker.tick().await;
                 let _ = senders.send_to_screen(ScreenInstruction::SerializeLayoutForResurrection);
+            }
+        });
+    }
+
+    // Gezellij: the parking supervisor's heartbeat. One second, not fifteen: parking must feel
+    // prompt when it happens, and the tick itself is a handful of map lookups in the screen
+    // thread that does nothing at all unless somebody has actually gone quiet.
+    if park_inactive_clients {
+        let senders = bus.senders.clone();
+        runtime.spawn(async move {
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_millis(PARK_CHECK_INTERVAL_MS));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let _ = senders.send_to_screen(ScreenInstruction::ParkInactiveClients);
             }
         });
     }

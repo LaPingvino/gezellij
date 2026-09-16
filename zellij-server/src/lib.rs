@@ -13,6 +13,7 @@ pub mod tab;
 
 pub(crate) mod auto_freeze;
 pub mod background_jobs;
+pub(crate) mod client_activity;
 mod global_async_runtime;
 mod logging_pipe;
 mod mobile_web;
@@ -118,6 +119,15 @@ pub enum ServerInstruction {
         client_id: ClientId,
     },
     DisconnectAllClientsExcept(ClientId),
+    /// Gezellij: disconnect one named client (`zellij action kick-client <CLIENT_ID>`).
+    KickClient {
+        client_id_to_kick: ClientId,
+        /// the client the command is attributed to; refused if it is the one being kicked
+        requesting_client: ClientId,
+        /// where to print the answer (the cli client, usually)
+        reply_to_client: ClientId,
+        completion_tx: Option<NotificationEnd>,
+    },
     ChangeMode(ClientId, InputMode, Option<NotificationEnd>),
     ChangeModeForAllClients(InputMode),
     Reconfigure {
@@ -171,6 +181,7 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::AssociatePipeWithClient { .. } => {
                 ServerContext::AssociatePipeWithClient
             },
+            ServerInstruction::KickClient { .. } => ServerContext::KickClient,
             ServerInstruction::DisconnectAllClientsExcept(..) => {
                 ServerContext::DisconnectAllClientsExcept
             },
@@ -580,6 +591,8 @@ fn remove_client_and_flush_forwards(
     if let Some(auto_freeze) = crate::auto_freeze::get() {
         auto_freeze.clients_changed(session_state);
     }
+    // Gezellij: and the same for the per-client presence map behind `list-clients` and parking.
+    crate::client_activity::forget(client_id);
     if stuck_tokens.is_empty() {
         return;
     }
@@ -1152,6 +1165,9 @@ pub fn start_server_impl(
                     client_attributes.size,
                     is_web_client,
                 );
+                // Gezellij: start this client's idle clock now, so a freshly attached client is
+                // never reported (or parked) as ancient.
+                crate::client_activity::seed(client_id);
 
                 session_data
                     .read()
@@ -1322,6 +1338,9 @@ pub fn start_server_impl(
                     client_attributes.size,
                     is_web_client,
                 );
+                // Gezellij: start this client's idle clock now, so a freshly attached client is
+                // never reported (or parked) as ancient.
+                crate::client_activity::seed(client_id);
 
                 session_data
                     .senders
@@ -1649,6 +1668,67 @@ pub fn start_server_impl(
                         },
                     );
                     remove_client!(client_id, os_input, session_state, session_data);
+                }
+            },
+            ServerInstruction::KickClient {
+                client_id_to_kick,
+                requesting_client,
+                reply_to_client,
+                completion_tx,
+            } => {
+                // Gezellij: the one-client sibling of DisconnectAllClientsExcept. It mirrors
+                // DetachSession rather than that handler, because DetachSession is the one that
+                // also tells Screen and the plugin thread - without those the kicked client
+                // lingers in `Screen::client_sizes` and keeps capping the tab, which is the
+                // entire thing we are trying to fix.
+                let connected = session_state.read().unwrap().client_ids();
+                let mut error = None;
+                if client_id_to_kick == requesting_client {
+                    error = Some(format!(
+                        "Refusing to kick client {} - that is you. Use `zellij action detach` \
+                         to disconnect yourself.",
+                        client_id_to_kick
+                    ));
+                } else if !connected.contains(&client_id_to_kick) {
+                    error = Some(format!(
+                        "No client with id {} is attached to this session. Try `zellij action \
+                         list-clients`.",
+                        client_id_to_kick
+                    ));
+                }
+                match error {
+                    Some(error) => {
+                        let _ = to_server.send(ServerInstruction::LogError(
+                            vec![error],
+                            reply_to_client,
+                            completion_tx,
+                        ));
+                    },
+                    None => {
+                        if let Some(session_data) = session_data.write().unwrap().as_mut() {
+                            session_data.remove_key_passthrough_client(client_id_to_kick);
+                        }
+                        let _ = os_input.send_to_client(
+                            client_id_to_kick,
+                            ServerToClientMsg::Exit {
+                                exit_reason: ExitReason::ForceDetached,
+                            },
+                        );
+                        remove_client!(client_id_to_kick, os_input, session_state, session_data);
+                        if let Some(session_data) = session_data.read().unwrap().as_ref() {
+                            let _ = session_data
+                                .senders
+                                .send_to_screen(ScreenInstruction::RemoveClient(client_id_to_kick));
+                            let _ = session_data
+                                .senders
+                                .send_to_plugin(PluginInstruction::RemoveClient(client_id_to_kick));
+                        }
+                        let _ = to_server.send(ServerInstruction::Log(
+                            vec![format!("Disconnected client {}.", client_id_to_kick)],
+                            reply_to_client,
+                            completion_tx,
+                        ));
+                    },
                 }
             },
             ServerInstruction::DetachSession(client_ids, completion_tx) => {
@@ -2253,6 +2333,8 @@ fn init_session(
 
     let serialization_interval = config_options.serialization_interval;
     let disable_session_metadata = config_options.disable_session_metadata.unwrap_or(false);
+    // Gezellij: only tick the parking supervisor when the feature is actually configured.
+    let park_inactive_clients = config_options.park_inactive_clients_after.is_some();
     let web_server_ip = config_options
         .web_server_ip
         .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
@@ -2429,6 +2511,7 @@ fn init_session(
                     serialization_interval,
                     disable_session_metadata,
                     web_server_base_url,
+                    park_inactive_clients,
                 )
                 .fatal()
             }
