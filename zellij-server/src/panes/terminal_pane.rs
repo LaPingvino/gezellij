@@ -1202,11 +1202,30 @@ impl Pane for TerminalPane {
         // if this is a command pane that has exited or is waiting to be rerun, will return its
         // RunCommand, otherwise it is safe to assume this is not the right sort of pane or that it
         // is not in the right sort of state
-        self.is_held.take().map(|(_, _, run_command)| {
+        self.is_held.take().map(|(exit_status, _, run_command)| {
             self.is_held = None;
-            self.grid.reset_terminal_state();
+            // Gezellij: a supervised pane (one with a restart policy) keeps its history across
+            // runs so a crash loop stays diagnosable; a dim separator marks where the next run
+            // begins. Unsupervised panes, first runs and panes left in the alternate screen get
+            // the classic full reset.
+            let keep_history = !run_command.restart.is_no()
+                && self.banner.is_none()
+                && !self.grid.is_alternate_mode_active();
+            if keep_history {
+                let status = match exit_status {
+                    Some(code) => format!("exit status {}", code),
+                    None => "killed by a signal".to_string(),
+                };
+                let separator = format!(
+                    "\r\n\u{1b}[2m── command exited ({}), restarting ──\u{1b}[0m\r\n",
+                    status
+                );
+                self.handle_pty_bytes(separator.into_bytes());
+            } else {
+                self.grid.reset_terminal_state();
+                self.remove_banner();
+            }
             self.set_should_render(true);
-            self.remove_banner();
             run_command.clone()
         })
     }

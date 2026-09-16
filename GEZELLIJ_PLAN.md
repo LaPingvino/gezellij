@@ -102,7 +102,8 @@
 - [x] Implement basic process supervision / auto-restart logic (`restart = "always" | "on-failure" | "no"`). *(`RunCommand.restart` + `pty.rs::command_exit_callback`, exponential backoff, KDL `restart` property, `attach --restart`)*
 - [x] Implement `systemd --user` unit generation helper (`gezellij service export-systemd <name>`). *(`zellij-utils/src/host_fabric/systemd.rs`; `Type=oneshot` for now, see §5.3)*
 - [x] Server foreground mode (`--server-foreground`, `zellij service run <name>`): systemd units are now `Type=simple` + `Restart=on-failure` with a real main process.
-- [ ] Follow-ups: keep previous run's output visible in `service logs`; show services in the session-manager plugin; Arch PKGBUILD + login takeover script (in progress).
+- [x] Supervised panes keep scrollback across restarts (separator line), so `service logs` shows the crash history.
+- [ ] Follow-ups: show services in the session-manager plugin; Arch PKGBUILD + login takeover script (in progress).
 
 ### Phase 2: Cgroups v2 Process Freezing
 - [ ] Add cgroups v2 detection and freezer controller interface in `zellij-utils`.

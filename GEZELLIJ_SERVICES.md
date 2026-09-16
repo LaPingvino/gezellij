@@ -230,10 +230,11 @@ Worth knowing if you go reading the source:
   mechanism, which re-sends the visible pane (plus the requested scrollback) whenever it changes.
   Fine for watching a service, noisy for piping into other tools; a true append-only stream is on
   the list.
-- **`logs` shows the current run.** A supervised pane is re-run through Zellij's normal
-  "re-run held command" path, which resets the pane's screen and scrollback first. So after a
-  crash loop you see the output of the run that is going on now, not of the runs that crashed.
-  Keeping the previous run's output (or teeing service output to a file) is on the list.
+- **`logs` keeps history across supervised restarts.** When a pane with a restart policy is
+  re-run, its scrollback is kept and a dim `── command exited (exit status 1), restarting ──`
+  separator marks the next run, so a crash loop stays diagnosable. Panes without a policy (and
+  panes left in the alternate screen) get Zellij's classic full reset. History is still bounded
+  by `scroll_buffer_size`.
 
 Phase 1 of [GEZELLIJ_PLAN.md](GEZELLIJ_PLAN.md) is deliberately small. Today:
 
