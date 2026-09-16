@@ -1,0 +1,158 @@
+# Maintainer: Joop Kiefte <ikojba@gmail.com>
+#
+# gezellij-git — Gezellij, a fork of Zellij extended with supervised background
+# services. The upstream binary is still called `zellij` internally (the rename
+# is a later phase of the project), but this package installs it as `gezellij`.
+#
+# ---------------------------------------------------------------------------
+# WHY `gezellij` AND NOT `zellij`
+# ---------------------------------------------------------------------------
+# There is deliberately NO `provides=('zellij')` and NO `conflicts=('zellij')`.
+# The distro `zellij` package stays installed and completely untouched, so:
+#   * rollback is `pacman -R gezellij-git` and nothing else changes;
+#   * `zellij` on your PATH is still the stock, known-good binary;
+#   * the two can be compared side by side.
+# The shell completions are likewise renamed (see package()), because installing
+# them under the upstream names would be a *file conflict* with the `zellij`
+# package and pacman would refuse to install this one.
+#
+# ---------------------------------------------------------------------------
+# CAVEAT: SHARED CONFIG AND SOCKET DIRECTORIES
+# ---------------------------------------------------------------------------
+# Renaming the binary does NOT isolate Gezellij from Zellij at runtime:
+#   * config/layouts/themes still come from ~/.config/zellij
+#     (override with `gezellij --config-dir ...` or ZELLIJ_CONFIG_DIR);
+#   * the IPC socket dir is still $TMPDIR/zellij-$UID/<version> and both
+#     builds report version 0.46.0, so a `gezellij attach` can land on a server
+#     started by the stock `zellij` and vice versa. Set ZELLIJ_SOCKET_DIR
+#     (zellij-utils/src/envs.rs: SOCKET_DIR_ENV_KEY) to a separate directory if
+#     you want strict isolation while testing.
+# The binary spawns its own server via std::env::current_exe(), so running it
+# under the name `gezellij` is fine — the server is the same file.
+#
+# ---------------------------------------------------------------------------
+# BUILDING FROM A LOCAL CHECKOUT
+# ---------------------------------------------------------------------------
+# By default this builds the pushed GitHub branch. makepkg *clones* the source,
+# so only committed (and, for the https URL, pushed) content is built — local
+# uncommitted changes are NOT picked up. To build your working checkout instead,
+# commit your work and replace the source line below with a file:// URL, e.g.
+#   source=("gezellij::git+file:///home/joop/gezellij#branch=feat/phase1-service-mode")
+# (An absolute path is required; makepkg forbids source entries that depend on
+# $startdir/$srcdir.) `#branch=`, `#tag=` and `#commit=` all work.
+
+pkgname=gezellij-git
+pkgver=0.46.0.r0.0000000
+pkgrel=1
+pkgdesc="Gezellij — Zellij fork with supervised background services (installs as /usr/bin/gezellij)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/LaPingvino/gezellij"
+license=('MIT')
+
+# Runtime dependencies.
+#
+# With the crate's DEFAULT features (which is what build() uses) the heavy
+# native libraries are all statically linked into the binary:
+#   * `vendored_curl` -> isahc/static-curl + openssl-sys "vendored"
+#     => no system libcurl, no system libssl/libcrypto at runtime;
+#   * `web_server_capability` -> rusqlite "bundled"
+#     => no system sqlite at runtime.
+# So all that is left is the C runtime and libgcc.
+# If you ever build with `--no-default-features`, add 'openssl' and 'curl' here.
+depends=('glibc' 'gcc-libs')
+
+# `cargo`/`rust` and `git` are obvious. `perl` is needed by openssl-src's
+# Configure script (pulled in by the vendored openssl-sys). `protobuf` is not
+# strictly required for `cargo build` (the prost codegen lives in `cargo xtask`
+# and its generated .rs files are committed) but is listed because any xtask
+# based build, including upstream's own, wants protoc available.
+makedepends=('cargo' 'git' 'perl' 'protobuf')
+provides=()
+conflicts=()
+options=('!lto')
+source=("gezellij::git+https://github.com/LaPingvino/gezellij.git#branch=feat/phase1-service-mode")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/gezellij"
+    # Note: makepkg does not run with `set -o pipefail`, so a `git describe |
+    # sed || fallback` chain would never reach the fallback. Branch explicitly.
+    local desc
+    if desc="$(git describe --long --tags 2>/dev/null)"; then
+        printf '%s' "$desc" | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+    else
+        printf '0.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    fi
+}
+
+prepare() {
+    cd "$srcdir/gezellij"
+    export CARGO_HOME="$srcdir/cargo-home"
+    # Same reason as in build(): rust-toolchain.toml pins 1.95.0 plus the
+    # wasm32-wasip1/musl targets, and under `rustup` even `rustc -vV` and
+    # `cargo fetch` would honour it and try to download a toolchain. Harmless
+    # no-op with the plain `rust` package.
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$srcdir/gezellij"
+    export CARGO_HOME="$srcdir/cargo-home"
+    export CARGO_TARGET_DIR="$srcdir/target"
+    # rust-toolchain.toml pins channel 1.95.0 plus the wasm32-wasip1 and musl
+    # targets. Under the `rustup` package that would make cargo try to download
+    # a toolchain (makepkg builds must not hit the network); under the plain
+    # `rust` package this export is a harmless no-op. It is also what the Arch
+    # Rust package guidelines prescribe.
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
+    export CARGO_PROFILE_RELEASE_STRIP=none
+
+    # A plain release build is enough: the builtin WASM plugins are embedded
+    # from the committed `zellij-utils/assets/plugins/*.wasm`. The
+    # `plugins_from_target` default feature only redirects to
+    # target/wasm32-wasip1/debug when `debug_assertions` is on (see the
+    # add_plugin! macro in zellij-utils/src/consts.rs), i.e. never in --release.
+    # So no wasm32-wasip1 toolchain/target is required here.
+    cargo build --release --frozen
+}
+
+package() {
+    cd "$srcdir/gezellij"
+    local bin="$srcdir/target/release/zellij"
+
+    install -Dm755 "$bin" "$pkgdir/usr/bin/gezellij"
+
+    # Shell completions.
+    #
+    # `zellij setup --generate-completion <shell>` hardcodes the command name
+    # "zellij" (clap_complete::generate(..., "zellij", ...) in
+    # zellij-utils/src/setup.rs) and the zsh extra-completion shells out to
+    # `zellij list-sessions`. We rewrite the lowercase word `zellij` to
+    # `gezellij` and install under gezellij names. The pattern is deliberately
+    # case sensitive so that $ZELLIJ_* environment variables inside the
+    # completion scripts survive untouched.
+    local sh
+    for sh in bash zsh fish; do
+        "$bin" setup --generate-completion "$sh" \
+            | sed 's/\bzellij\b/gezellij/g' > "$srcdir/gezellij-completion.$sh"
+    done
+    install -Dm644 "$srcdir/gezellij-completion.bash" \
+        "$pkgdir/usr/share/bash-completion/completions/gezellij"
+    install -Dm644 "$srcdir/gezellij-completion.zsh" \
+        "$pkgdir/usr/share/zsh/site-functions/_gezellij"
+    install -Dm644 "$srcdir/gezellij-completion.fish" \
+        "$pkgdir/usr/share/fish/vendor_completions.d/gezellij.fish"
+
+    # Login helper (see packaging/login/gezellij-login-setup.sh in this repo).
+    # It lives in the cloned source tree, so it must be committed to the branch
+    # named in source=() for this to succeed.
+    install -Dm755 "$srcdir/gezellij/packaging/login/gezellij-login-setup.sh" \
+        "$pkgdir/usr/bin/gezellij-login-setup"
+
+    install -Dm644 LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.md"
+    install -Dm644 GEZELLIJ_PLAN.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_PLAN.md"
+    install -Dm644 GEZELLIJ_SERVICES.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_SERVICES.md"
+    install -Dm644 packaging/README.md "$pkgdir/usr/share/doc/gezellij/PACKAGING.md"
+}
