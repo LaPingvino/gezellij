@@ -11,6 +11,7 @@ pub mod output;
 pub mod panes;
 pub mod tab;
 
+pub(crate) mod auto_freeze;
 pub mod background_jobs;
 mod global_async_runtime;
 mod logging_pipe;
@@ -573,6 +574,12 @@ fn remove_client_and_flush_forwards(
 ) {
     let _ = os_input.remove_client(client_id);
     let stuck_tokens = session_state.write().unwrap().remove_client(client_id);
+    // Gezellij: every client-removal path (RemoveClient, DetachSession, ClientExited,
+    // KillSession, ...) funnels through here, so this is the one place the idle clock of
+    // auto-freeze needs to learn that a client went away.
+    if let Some(auto_freeze) = crate::auto_freeze::get() {
+        auto_freeze.clients_changed(session_state);
+    }
     if stuck_tokens.is_empty() {
         return;
     }
@@ -1127,6 +1134,19 @@ pub fn start_server_impl(
                     .insert(client_id, default_input_mode);
 
                 *session_data.write().unwrap() = Some(session);
+                // Gezellij: arm opt-in idle auto-freeze (off unless `auto_freeze_after` is set)
+                // and make sure this very client finds a thawed session.
+                #[cfg(unix)]
+                if let Some(threshold) = runtime_config_options.auto_freeze_after {
+                    if let Ok(session_name) = envs::get_session_name() {
+                        crate::auto_freeze::arm(session_name, threshold, session_state.clone());
+                    } else {
+                        log::warn!("auto_freeze_after is set but this server has no session name");
+                    }
+                }
+                if let Some(auto_freeze) = crate::auto_freeze::get() {
+                    auto_freeze.on_attach();
+                }
                 session_state.write().unwrap().set_client_data(
                     client_id,
                     client_attributes.size,
@@ -1292,6 +1312,11 @@ pub fn start_server_impl(
                     .current_input_modes
                     .insert(client_id, default_input_mode);
 
+                // Gezellij: a client is attaching - thaw an auto-frozen session right now rather
+                // than at the next supervisor tick (an idempotent sysfs write).
+                if let Some(auto_freeze) = crate::auto_freeze::get() {
+                    auto_freeze.on_attach();
+                }
                 session_state.write().unwrap().set_client_data(
                     client_id,
                     client_attributes.size,

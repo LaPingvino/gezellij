@@ -2990,6 +2990,20 @@ impl Options {
             "dangerously_enable_paste_buffer_read"
         )
         .map(|(v, _)| v);
+        // Gezellij: `auto_freeze_after "10m"` - a humantime duration, config-file only
+        let auto_freeze_after =
+            match kdl_property_first_arg_as_string_or_error!(kdl_options, "auto_freeze_after") {
+                Some((value, entry)) => match humantime::parse_duration(value) {
+                    Ok(duration) => Some(duration),
+                    Err(e) => {
+                        return Err(kdl_parsing_error!(
+                            format!("Invalid auto_freeze_after '{}': {}", value, e),
+                            entry
+                        ))
+                    },
+                },
+                None => None,
+            };
 
         Ok(Options {
             simplified_ui,
@@ -3051,6 +3065,7 @@ impl Options {
             client_async_worker_tasks,
             nested_session_handling,
             dangerously_enable_paste_buffer_read,
+            auto_freeze_after,
         })
     }
     pub fn from_string(stringified_keybindings: &String) -> Result<Self, ConfigError> {
@@ -4755,6 +4770,14 @@ impl Options {
             None
         }
     }
+    /// Gezellij: `auto_freeze_after "10m"`. Only emitted when set - the feature is off by
+    /// default and we do not want a commented example rewritten into everybody's config.
+    fn auto_freeze_after_to_kdl(&self, _add_comments: bool) -> Option<KdlNode> {
+        let duration = self.auto_freeze_after?;
+        let mut node = KdlNode::new("auto_freeze_after");
+        node.push(humantime::format_duration(duration).to_string());
+        Some(node)
+    }
     fn client_async_worker_tasks_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = r#"
 // Number of async worker tasks to spawn per active client.
@@ -4966,6 +4989,9 @@ impl Options {
             self.dangerously_enable_paste_buffer_read_to_kdl(add_comments)
         {
             nodes.push(dangerously_enable_paste_buffer_read);
+        }
+        if let Some(auto_freeze_after) = self.auto_freeze_after_to_kdl(add_comments) {
+            nodes.push(auto_freeze_after);
         }
         if let Some(nested_session_handling) = self.nested_session_handling_to_kdl(add_comments) {
             nodes.push(nested_session_handling);
@@ -7816,6 +7842,52 @@ fn explicit_theme_hue_round_trips_through_kdl() {
         Some(ThemeHue::Dark),
         "explicit_theme_hue survives a serialize/parse round trip"
     );
+}
+
+#[test]
+fn auto_freeze_after_is_parsed_and_roundtrips() {
+    // Gezellij: opt-in idle auto-freeze, a humantime duration in the config file
+    let document: KdlDocument = r##"
+        auto_freeze_after "10m"
+    "##
+    .parse()
+    .unwrap();
+    let options = Options::from_kdl(&document).unwrap();
+    assert_eq!(
+        options.auto_freeze_after,
+        Some(std::time::Duration::from_secs(600))
+    );
+
+    let mut serialized = Options::to_kdl(&options, false);
+    let mut fake_document = KdlDocument::new();
+    fake_document.nodes_mut().append(&mut serialized);
+    let serialized = fake_document.to_string();
+    assert!(
+        serialized.contains("auto_freeze_after \"10m\""),
+        "expected auto_freeze_after in {}",
+        serialized
+    );
+    let reparsed = Options::from_kdl(&serialized.parse::<KdlDocument>().unwrap()).unwrap();
+    assert_eq!(reparsed.auto_freeze_after, options.auto_freeze_after);
+
+    // unset by default, and not emitted at all then
+    let empty: KdlDocument = "".parse().unwrap();
+    let options = Options::from_kdl(&empty).unwrap();
+    assert_eq!(options.auto_freeze_after, None);
+    let mut serialized = Options::to_kdl(&options, true);
+    let mut fake_document = KdlDocument::new();
+    fake_document.nodes_mut().append(&mut serialized);
+    assert!(!fake_document.to_string().contains("auto_freeze_after"));
+}
+
+#[test]
+fn auto_freeze_after_rejects_nonsense() {
+    let document: KdlDocument = r##"
+        auto_freeze_after "soonish"
+    "##
+    .parse()
+    .unwrap();
+    assert!(Options::from_kdl(&document).is_err());
 }
 
 #[test]

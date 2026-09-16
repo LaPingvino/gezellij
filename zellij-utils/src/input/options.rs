@@ -426,6 +426,46 @@ pub struct Options {
     #[clap(long, value_parser)]
     #[serde(default)]
     pub dangerously_enable_paste_buffer_read: Option<bool>,
+
+    /// Gezellij: freeze a session (with the cgroup v2 freezer) once no client has been attached
+    /// to it for this long, and thaw it the moment one attaches again. Off when unset.
+    ///
+    /// Configuration-file only (`auto_freeze_after "10m"`), parsed with humantime; there is
+    /// deliberately no CLI flag for it.
+    #[clap(skip)]
+    #[serde(default, with = "humantime_serde_option")]
+    pub auto_freeze_after: Option<std::time::Duration>,
+}
+
+/// Serialize `Option<Duration>` as a humantime string (`"10m"`), so a serialized `Options` keeps
+/// the same spelling the config file uses.
+mod humantime_serde_option {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<Duration>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(duration) => {
+                serializer.serialize_some(&humantime::format_duration(*duration).to_string())
+            },
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Duration>, D::Error> {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        match raw {
+            Some(raw) => humantime::parse_duration(&raw)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
 }
 
 #[derive(ValueEnum, Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
@@ -602,6 +642,7 @@ impl Options {
         let dangerously_enable_paste_buffer_read = other
             .dangerously_enable_paste_buffer_read
             .or(self.dangerously_enable_paste_buffer_read);
+        let auto_freeze_after = other.auto_freeze_after.or(self.auto_freeze_after);
 
         Options {
             simplified_ui,
@@ -663,6 +704,7 @@ impl Options {
             client_async_worker_tasks,
             nested_session_handling,
             dangerously_enable_paste_buffer_read,
+            auto_freeze_after,
         }
     }
 
@@ -773,6 +815,7 @@ impl Options {
         let dangerously_enable_paste_buffer_read = other
             .dangerously_enable_paste_buffer_read
             .or(self.dangerously_enable_paste_buffer_read);
+        let auto_freeze_after = other.auto_freeze_after.or(self.auto_freeze_after);
 
         Options {
             simplified_ui,
@@ -834,6 +877,7 @@ impl Options {
             client_async_worker_tasks,
             nested_session_handling,
             dangerously_enable_paste_buffer_read,
+            auto_freeze_after,
         }
     }
 

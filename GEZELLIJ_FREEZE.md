@@ -67,6 +67,50 @@ otherwise freeze or thaw every pane of it — the same `cgroup.freeze` writes.
 frozen shows `frozen`, one where only some are shows `partly frozen` (both in cyan, next to green
 `running` and red `stopped`). `--no-formatting` prints the same words without colour.
 
+## Auto-freeze of idle sessions
+
+Off by default. Put a humantime duration in your `config.kdl`:
+
+```kdl
+auto_freeze_after "10m"
+```
+
+and every session started by a server with that configuration freezes itself once **no client has
+been attached to it for that long**, and thaws again **the moment a client attaches**. The thaw is
+immediate (it happens on the attach path itself, not at the next poll), so attaching feels the
+same as always.
+
+The semantics, precisely:
+
+- a supervisor thread wakes every 15 seconds; it only exists when the option is set *and* the
+  session actually has pane cgroups. Without cgroup v2 delegation the server logs one warning at
+  startup and the option does nothing;
+- the idle clock starts when the last client disconnects (detach, `zellij kill-client`, a crashed
+  terminal - every removal path goes through the same place in the server) and is re-derived from
+  the live client list on every tick, so it cannot get stuck;
+- the freezer state is always read back from `/sys/fs/cgroup`, never remembered, and auto-freeze
+  only ever undoes *its own* freeze. So: if auto-freeze froze the session and you then run
+  `zellij thaw <session>` without attaching, it stays thawed until a client has attached and left
+  again; and a session you froze by hand with `zellij freeze` while attached stays frozen - the
+  supervisor will not thaw it behind your back. Attaching, on the other hand, always thaws: that
+  is an explicit "I want to look at this now";
+- a session with no pane cgroups at all (no terminal panes, or no delegation) is never touched,
+  and every sysfs error is logged at warn level and otherwise ignored - auto-freeze can never take
+  the session down;
+- it is a configuration-file option only: there is no CLI flag and it is not sent over the client
+  protocol, so it is the *server's* configuration that decides.
+
+`auto_freeze_after` applies to the whole server's session, services included.
+
+### The honest caveat
+
+A frozen session does nothing. That is the entire point for a development stack you left lying
+around, and exactly the wrong thing for a service you want to keep serving traffic: a
+`zellij service` whose session auto-freezes stops answering requests as soon as you detach, until
+someone attaches again. There is **no per-service opt-out yet** - the option is global to the
+server. So set it in a configuration used by development sessions, not in one used by the servers
+that run your services, until per-service control exists.
+
 ## Housekeeping
 
 - A pane's cgroup is removed when its process tree has exited (after the pane's exit callback
@@ -80,6 +124,7 @@ frozen shows `frozen`, one where only some are shows `partly frozen` (both in cy
 - A frozen indicator in the pane frame and in the session manager. The session-manager plugin is
   a WASM guest and cannot read `/sys/fs/cgroup` itself, so this needs the server to poll
   `cgroup.events` and carry the state on the session info it already sends.
-- Auto-freeze: freeze a session after N minutes without an attached client, thaw on attach.
+- Per-service (and per-session) opt-out for auto-freeze, so a machine can auto-freeze its
+  development sessions while its services keep serving.
 - Memory/CPU limits per pane through the same cgroups (`memory.max`, `cpu.max`) once a
   controller is delegated.

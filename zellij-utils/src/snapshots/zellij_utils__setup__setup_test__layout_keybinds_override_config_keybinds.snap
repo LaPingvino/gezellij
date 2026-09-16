@@ -149,6 +149,7 @@ Config {
         client_async_worker_tasks: None,
         nested_session_handling: None,
         dangerously_enable_paste_buffer_read: None,
+        auto_freeze_after: None,
     },
     themes: {},
     plugins: PluginAliases {

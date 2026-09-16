@@ -221,6 +221,18 @@ impl PaneCgroups {
         }
         Ok(summary)
     }
+    /// Whether *every* pane of the session is frozen.
+    ///
+    /// `Ok(None)` means there is nothing to say: the session has no pane cgroups at all (no
+    /// terminal panes, or they all exited), which is never "frozen".
+    pub fn is_frozen(&self) -> io::Result<Option<bool>> {
+        let summary = self.freeze_summary()?;
+        if summary.total == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(summary.all_frozen()))
+        }
+    }
     /// Best-effort teardown at server exit: thaw and remove every pane cgroup, then the root and
     /// the CLI record. Also sweeps empty leftovers of earlier sessions next to this root.
     pub fn remove_all(&self, session_name: &str) {
@@ -271,6 +283,17 @@ pub fn set_session_frozen(session_name: &str, frozen: bool) -> io::Result<Option
 pub fn session_freeze_summary(session_name: &str) -> io::Result<Option<FreezeSummary>> {
     match PaneCgroups::from_session_record(session_name)? {
         Some(tree) => Ok(Some(tree.freeze_summary()?)),
+        None => Ok(None),
+    }
+}
+
+/// Whether every pane of a session (by name) is frozen.
+///
+/// `Ok(None)` covers both "no recorded cgroup root" (the server runs without cgroup v2
+/// delegation) and "no pane cgroups at all" - in either case there is nothing to freeze or thaw.
+pub fn session_is_frozen(session_name: &str) -> io::Result<Option<bool>> {
+    match PaneCgroups::from_session_record(session_name)? {
+        Some(tree) => tree.is_frozen(),
         None => Ok(None),
     }
 }
@@ -433,6 +456,48 @@ mod tests {
                 frozen: 1
             }
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn is_frozen_reports_all_none_or_some() {
+        let (root, tree) = fake_tree("isfrozen-all", &[(1, true), (2, true)]);
+        assert_eq!(tree.is_frozen().unwrap(), Some(true));
+        let _ = fs::remove_dir_all(&root);
+
+        let (root, tree) = fake_tree("isfrozen-partly", &[(1, true), (2, false)]);
+        assert_eq!(tree.is_frozen().unwrap(), Some(false));
+        let _ = fs::remove_dir_all(&root);
+
+        let (root, tree) = fake_tree("isfrozen-none", &[(1, false)]);
+        assert_eq!(tree.is_frozen().unwrap(), Some(false));
+        let _ = fs::remove_dir_all(&root);
+
+        // a session with no panes at all has nothing to say
+        let (root, tree) = fake_tree("isfrozen-empty", &[]);
+        assert_eq!(tree.is_frozen().unwrap(), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn set_all_frozen_writes_every_pane() {
+        let (root, tree) = fake_tree("setall", &[(1, false), (2, false)]);
+        let results = tree.set_all_frozen(true).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(_, r)| r.is_ok()));
+        for id in [1u32, 2] {
+            assert_eq!(
+                fs::read_to_string(tree.pane_dir(id).join("cgroup.freeze")).unwrap(),
+                "1\n"
+            );
+        }
+        tree.set_all_frozen(false).unwrap();
+        for id in [1u32, 2] {
+            assert_eq!(
+                fs::read_to_string(tree.pane_dir(id).join("cgroup.freeze")).unwrap(),
+                "0\n"
+            );
+        }
         let _ = fs::remove_dir_all(&root);
     }
 

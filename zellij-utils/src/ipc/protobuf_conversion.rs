@@ -1023,6 +1023,9 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Options>
         };
 
         Ok(Self {
+            // Gezellij: `auto_freeze_after` is a configuration-file option only; it is read by
+            // the server from its own config and never travels over the client protocol.
+            auto_freeze_after: None,
             simplified_ui: options.simplified_ui,
             theme: options.theme,
             theme_dark: options.theme_dark,
