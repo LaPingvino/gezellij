@@ -120,7 +120,8 @@
 - [x] Implement `gezellij upgrade-server` CLI action. *(`zellij upgrade-server [session] [--force]`; refuses when the on-disk binary is unchanged unless forced; `GEZELLIJ_UPGRADE_BINARY` in the server's environment overrides the target, handy for testing)*
 - [ ] Socket-based handover (`host_fabric/handover.rs` transport is ready) as the rollback-safe variant; correlation side-car and KillMode notes in `HANDOVER_DESIGN.md` still apply to it.
 - [x] Detection and bulk migration: `zellij upgrade-server --all`, a note on `attach` when the session's server runs a replaced binary, a `pacman` PostTransaction hook that reminds every user, and an opt-in `systemd --user` path unit that migrates sessions the moment `/usr/bin/gezellij` changes. An aborted upgrade reports its reason within a second instead of timing out (`<sock dir>/handover/<session>.exec.error`). *(see `GEZELLIJ_UPGRADE.md`)*
-- [ ] Hardening: tell attached clients to re-attach instead of dropping them; layout-compat corpus test.
+- [x] Attached clients are detached cleanly before the exec, with a new `ExitReason::ServerUpgraded` explaining what happened and how to come back (verified against a real client in a pty).
+- [ ] Hardening: layout-compat corpus test; carry the session's creation time across an upgrade.
 
 ### Phase 4: Network & Loopback IPv6 Helpers
 - [x] Add `--bind-ip <ipv6>` flag to service / pane runners. *(`service add --bind-ip`: the address is derived per service from a per-installation random ULA prefix and exported as `GEZELLIJ_BIND_ADDR/_PORT/_URL`; same port everywhere)*

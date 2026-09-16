@@ -46,7 +46,7 @@ server simply keeps running. You lose nothing by trying.
 | Service restart policies and their supervision | **survive** |
 | Server pid (so `systemd` keeps tracking a `service run`) | **unchanged** |
 | Scrollback | **lost** — panes come back with a clean screen |
-| Attached clients | **disconnected** — re-attach with `zellij attach <session>` |
+| Attached clients | **cleanly detached**, told what happened and how to re-attach |
 | Plugins (status bar, tab bar, …) | restarted, they are stateless WASM |
 
 Scrollback is deliberate: the plan values keeping processes alive far above keeping pixels. It is
@@ -88,8 +88,10 @@ cgroups belong to the panes, not to the server, and the successor re-reads them.
 
 - Linux only. It leans on `/proc`, `execve` semantics and the process staying the parent of its
   pane children.
-- Attached clients are dropped rather than told to reconnect. Making the server hand them a
-  "reconnect now" message is the next step.
+- Attached clients are detached rather than reconnected for you. They exit cleanly with a message
+  naming the session and the command to come back; reconnecting them automatically would mean the
+  client surviving the socket being re-bound by a different binary, which is exactly the coupling
+  this design avoids.
 - A pane that was *held* (a command that exited, waiting for ENTER) has no pseudo-terminal to
   adopt, so it comes back held, which is exactly where it was.
 - An upgrade across a change in the client-server contract version moves the session's socket into
