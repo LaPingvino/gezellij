@@ -103,7 +103,8 @@
 - [x] Implement `systemd --user` unit generation helper (`gezellij service export-systemd <name>`). *(`zellij-utils/src/host_fabric/systemd.rs`; `Type=oneshot` for now, see §5.3)*
 - [x] Server foreground mode (`--server-foreground`, `zellij service run <name>`): systemd units are now `Type=simple` + `Restart=on-failure` with a real main process.
 - [x] Supervised panes keep scrollback across restarts (separator line), so `service logs` shows the crash history.
-- [ ] Follow-ups: show services in the session-manager plugin; Arch PKGBUILD + login takeover script (in progress).
+- [x] Session-manager plugin marks `svc-*` sessions with a SERVICE badge (both list styles).
+- [x] Arch `PKGBUILD` (`packaging/arch`, installs `/usr/bin/gezellij` beside stock zellij) and reversible login takeover script (`packaging/login`).
 
 ### Phase 2: Cgroups v2 Process Freezing
 - [ ] Add cgroups v2 detection and freezer controller interface in `zellij-utils`.
@@ -147,6 +148,14 @@ the agent writing this.
   plugins simply restart. In short: *resurrection + FD adoption*.
 * Anything that needs root (loopback routes, cgroup delegation) is a documented one-time setup
   step, never something the binary does on its own. Safer-than-Docker means no privileged daemon.
+* **Networking = swap ports for addresses.** Every service listens on the same well-known port on
+  its own IPv6 ULA loopback address; the address is the service's identity, which is also how a
+  reverse proxy wants to think. Per RFC 4193 the 40-bit global ID of the `fd00::/8` prefix must be
+  generated randomly *per installation* and stored in config (`fd00:2830::/64` in this document is
+  Joop's own local prefix and must not become a default); per-service interface IDs are derived
+  from a UUID / session id rather than from guessable names. One-time root setup
+  `ip -6 route add local <prefix>/64 dev lo` makes the whole prefix bindable without per-address
+  `ip addr add`, so nothing needs root at run time.
 
 ### 5.2 Verified findings
 

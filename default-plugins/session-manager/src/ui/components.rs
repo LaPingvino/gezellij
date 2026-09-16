@@ -13,6 +13,15 @@ use crate::{ActiveScreen, NewSessionInfo};
 // Render cache for unified results
 // ---------------------------------------------------------------
 
+/// Gezellij: sessions created by `zellij service` are named `svc-<name>`.
+pub const SERVICE_SESSION_PREFIX: &str = "svc-";
+const SERVICE_BADGE_FULL: &str = "SERVICE, ";
+const SERVICE_BADGE_ABBR: &str = "SVC, ";
+
+pub fn is_service_session(session_name: &str) -> bool {
+    session_name.starts_with(SERVICE_SESSION_PREFIX)
+}
+
 /// Pre-computed data for a single visible row, independent of selection state.
 #[derive(Clone)]
 pub struct CachedRowData {
@@ -102,42 +111,56 @@ impl UnifiedResultsRenderCache {
                     let tab_str = format!("{}", tab_count);
                     let pane_str = format!("{}", pane_count);
                     let conn_str = format!("{}", connected_users);
+                    // Gezellij: sessions hosting a supervised service get a badge in the details
+                    let is_service = is_service_session(session_name);
+                    let (full_prefix, abbr_prefix) = if is_service {
+                        (SERVICE_BADGE_FULL, SERVICE_BADGE_ABBR)
+                    } else {
+                        ("", "")
+                    };
 
                     // Full details
                     let full_details = format!(
-                        "{} tabs, {} panes, {} {}",
-                        tab_str, pane_str, conn_str, client_word
+                        "{}{} tabs, {} panes, {} {}",
+                        full_prefix, tab_str, pane_str, conn_str, client_word
                     );
                     let full_details_ranges = {
-                        let tab_end = tab_str.len();
-                        let pane_offset = tab_str.len() + " tabs, ".len();
+                        let tab_offset = full_prefix.len();
+                        let tab_end = tab_offset + tab_str.len();
+                        let pane_offset = tab_end + " tabs, ".len();
                         let pane_end = pane_offset + pane_str.len();
                         let conn_offset = pane_end + " panes, ".len();
                         let conn_end = conn_offset + conn_str.len();
-                        DetailsColorRanges {
-                            ranges: vec![
-                                (1, 0..tab_end),
-                                (2, pane_offset..pane_end),
-                                (2, conn_offset..conn_end),
-                            ],
+                        let mut ranges = vec![
+                            (1, tab_offset..tab_end),
+                            (2, pane_offset..pane_end),
+                            (2, conn_offset..conn_end),
+                        ];
+                        if is_service {
+                            ranges.push((3, 0..SERVICE_BADGE_FULL.trim_end().len()));
                         }
+                        DetailsColorRanges { ranges }
                     };
 
                     // Abbreviated details
-                    let abbr_details = format!("{}t, {}p, {}c", tab_str, pane_str, conn_str);
+                    let abbr_details =
+                        format!("{}{}t, {}p, {}c", abbr_prefix, tab_str, pane_str, conn_str);
                     let abbr_details_ranges = {
-                        let tab_end = tab_str.len();
-                        let pane_offset = tab_str.len() + "t, ".len();
+                        let tab_offset = abbr_prefix.len();
+                        let tab_end = tab_offset + tab_str.len();
+                        let pane_offset = tab_end + "t, ".len();
                         let pane_end = pane_offset + pane_str.len();
                         let conn_offset = pane_end + "p, ".len();
                         let conn_end = conn_offset + conn_str.len();
-                        DetailsColorRanges {
-                            ranges: vec![
-                                (1, 0..tab_end),
-                                (2, pane_offset..pane_end),
-                                (2, conn_offset..conn_end),
-                            ],
+                        let mut ranges = vec![
+                            (1, tab_offset..tab_end),
+                            (2, pane_offset..pane_end),
+                            (2, conn_offset..conn_end),
+                        ];
+                        if is_service {
+                            ranges.push((3, 0..SERVICE_BADGE_ABBR.trim_end().len()));
                         }
+                        DetailsColorRanges { ranges }
                     };
 
                     let name_width = session_name.width();
@@ -671,6 +694,14 @@ pub fn build_session_ui_line(session_ui_info: &SessionUiInfo, colors: Colors) ->
     ui_spans.push(session_name_span);
     ui_spans.push(tab_and_pane_count);
     ui_spans.push(connected_users_count);
+    if is_service_session(&session_ui_info.name) {
+        // Gezellij: this session hosts a supervised service
+        let service_indication = UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![
+            StringAndLength::new(colors.current_session_marker(&format!(" <SERVICE>")), 10),
+            StringAndLength::new(colors.current_session_marker(&format!(" <SVC>")), 6),
+        ]));
+        ui_spans.push(service_indication);
+    }
     if session_ui_info.is_current_session {
         let current_session_indication = UiSpan::UiSpanTelescope(UiSpanTelescope::new(vec![
             StringAndLength::new(
