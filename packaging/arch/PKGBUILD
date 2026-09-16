@@ -178,5 +178,9 @@ package() {
     install -Dm644 LICENSE.md "$pkgdir/usr/share/licenses/$pkgname/LICENSE.md"
     install -Dm644 GEZELLIJ_PLAN.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_PLAN.md"
     install -Dm644 GEZELLIJ_SERVICES.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_SERVICES.md"
+    install -Dm644 GEZELLIJ_FREEZE.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_FREEZE.md"
+    install -Dm644 GEZELLIJ_UPGRADE.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_UPGRADE.md"
+    install -Dm644 GEZELLIJ_THEMES.md "$pkgdir/usr/share/doc/gezellij/GEZELLIJ_THEMES.md"
+    install -Dm644 HANDOVER_DESIGN.md "$pkgdir/usr/share/doc/gezellij/HANDOVER_DESIGN.md"
     install -Dm644 packaging/README.md "$pkgdir/usr/share/doc/gezellij/PACKAGING.md"
 }
