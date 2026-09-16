@@ -303,6 +303,7 @@ fn new_pane_cli_action(
         name: None,
         close_on_exit,
         start_suspended,
+        restart: None,
         configuration: None,
         skip_plugin_cache: false,
         x: None,

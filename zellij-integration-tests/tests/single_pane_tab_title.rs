@@ -23,6 +23,7 @@ fn replace_pane_in_place_with_held_command(
         name: None,
         close_on_exit: false,
         start_suspended: false,
+        restart: None,
         configuration: None,
         skip_plugin_cache: false,
         x: None,

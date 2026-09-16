@@ -51,6 +51,7 @@ fn main() {
         if let Some(Command::Sessions(Sessions::Run {
             command,
             direction,
+            restart,
             cwd,
             floating,
             in_place,
@@ -100,6 +101,7 @@ fn main() {
                 name,
                 close_on_exit,
                 start_suspended,
+                restart,
                 configuration: None,
                 skip_plugin_cache,
                 x,
@@ -154,6 +156,7 @@ fn main() {
                 name: None,
                 close_on_exit: false,
                 start_suspended: false,
+                restart: None,
                 configuration,
                 skip_plugin_cache,
                 x,

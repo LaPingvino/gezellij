@@ -19,6 +19,7 @@ fn no_focus_new_pane_action(command: &[&str]) -> CliAction {
         name: None,
         close_on_exit: false,
         start_suspended: false,
+        restart: None,
         configuration: None,
         skip_plugin_cache: false,
         x: None,

@@ -668,6 +668,10 @@ pub enum Sessions {
         #[clap(short, long)]
         start_suspended: bool,
 
+        /// Gezellij: supervise the command - restart it when it exits (no, on-failure, always)
+        #[clap(long, value_enum)]
+        restart: Option<RestartPolicy>,
+
         /// The x coordinates if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
         #[clap(short, long, requires("floating"))]
         x: Option<String>,
@@ -1137,6 +1141,9 @@ pub enum CliAction {
         /// Start the command suspended, only running it after the you first press ENTER
         #[clap(short, long, requires("command"))]
         start_suspended: bool,
+        /// Gezellij: supervise the command - restart it when it exits (no, on-failure, always)
+        #[clap(long, value_enum, requires("command"))]
+        restart: Option<RestartPolicy>,
         #[clap(long, value_parser)]
         configuration: Option<PluginUserConfiguration>,
         #[clap(long, value_parser)]
