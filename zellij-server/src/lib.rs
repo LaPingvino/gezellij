@@ -95,6 +95,8 @@ pub enum ServerInstruction {
     RemoveClient(ClientId),
     Error(String),
     KillSession,
+    /// Gezellij: take a snapshot and exec the new binary in place (triggered by SIGUSR2)
+    PrepareUpgrade,
     DetachSession(Vec<ClientId>, Option<NotificationEnd>),
     AttachClient(
         CliAssets,
@@ -155,6 +157,7 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::RemoveClient(..) => ServerContext::RemoveClient,
             ServerInstruction::Error(_) => ServerContext::Error,
             ServerInstruction::KillSession => ServerContext::KillSession,
+            ServerInstruction::PrepareUpgrade => ServerContext::PrepareUpgrade,
             ServerInstruction::DetachSession(..) => ServerContext::DetachSession,
             ServerInstruction::AttachClient(..) => ServerContext::AttachClient,
             ServerInstruction::AttachWatcherClient(..) => ServerContext::AttachClient,
@@ -900,12 +903,18 @@ pub fn start_server(os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     start_server_impl(os_input, socket_path, true);
 }
 
+/// Gezellij: when set (by `--adopt <manifest>`), the server is the re-exec'd successor of an
+/// older server and must rebuild that session around the PTYs it inherited.
+pub static ADOPT_MANIFEST: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 pub fn start_server_impl(
     mut os_input: Box<dyn ServerOsApi>,
     socket_path: PathBuf,
     install_panic_hook: bool,
 ) {
     envs::set_zellij("0".to_string());
+    #[cfg(unix)]
+    zellij_utils::host_fabric::upgrade::record_original_exe();
 
     let (to_server, server_receiver): ChannelWithContext<ServerInstruction> = channels::bounded(50);
     let to_server = SenderWithContext::new(to_server);
@@ -998,6 +1007,56 @@ pub fn start_server_impl(
                 }
             }
         });
+
+    // Gezellij: SIGUSR2 asks a running server to upgrade itself in place
+    #[cfg(unix)]
+    {
+        let to_server = to_server.clone();
+        thread::Builder::new()
+            .name("upgrade_signal".to_string())
+            .spawn(move || {
+                if let Ok(mut signals) =
+                    signal_hook::iterator::Signals::new(&[signal_hook::consts::SIGUSR2])
+                {
+                    for _ in signals.forever() {
+                        let _ = to_server.send(ServerInstruction::PrepareUpgrade);
+                    }
+                }
+            })
+            .unwrap();
+    }
+
+    // Gezellij: we are the successor of an upgraded server - rebuild its session around the
+    // inherited PTYs instead of waiting for a first client
+    #[cfg(unix)]
+    if let Some(manifest_path) = ADOPT_MANIFEST.get() {
+        match zellij_utils::host_fabric::upgrade::read_exec_manifest(manifest_path) {
+            Ok(manifest) => {
+                log::info!(
+                    "adopting session '{}' from server pid {} ({} panes)",
+                    manifest.session_name,
+                    manifest.old_server_pid,
+                    manifest.pane_count()
+                );
+                crate::pty::set_adoption_plan(manifest.tabs.clone());
+                let client_id = session_state.write().unwrap().new_client();
+                let _ = to_server.send(ServerInstruction::FirstClientConnected(
+                    manifest.cli_assets.clone(),
+                    false,
+                    client_id,
+                ));
+                let _ = to_server.send(ServerInstruction::RemoveClient(client_id));
+                let _ = std::fs::remove_file(manifest_path);
+            },
+            Err(e) => {
+                log::error!(
+                    "cannot read upgrade manifest {}: {}",
+                    manifest_path.display(),
+                    e
+                );
+            },
+        }
+    }
 
     loop {
         let (instruction, mut err_ctx) = server_receiver.recv().unwrap();
@@ -1493,6 +1552,15 @@ pub fn start_server_impl(
                     },
                 );
                 remove_client!(client_id, os_input, session_state, session_data);
+            },
+            ServerInstruction::PrepareUpgrade => match session_data.read().unwrap().as_ref() {
+                Some(session_data) => {
+                    log::info!("in-place upgrade requested; snapshotting session");
+                    let _ = session_data
+                        .senders
+                        .send_to_screen(ScreenInstruction::PrepareUpgrade);
+                },
+                None => log::warn!("upgrade requested before the session was initialised"),
             },
             ServerInstruction::KillSession => {
                 let client_ids = session_state.read().unwrap().client_ids();
@@ -2126,6 +2194,7 @@ fn init_session(
     let to_background_jobs = SenderWithContext::new(to_background_jobs);
 
     // Determine and initialize the data directory
+    let cli_assets_for_pty = cli_assets.clone();
     let data_dir = cli_assets.data_dir.unwrap_or_else(get_default_data_dir);
 
     let serialization_interval = config_options.serialization_interval;
@@ -2171,6 +2240,7 @@ fn init_session(
                 cli_assets.is_debug,
                 config_options.scrollback_editor.clone(),
                 config_options.post_command_discovery_hook.clone(),
+                Some(cli_assets_for_pty),
             );
 
             move || pty_thread_main(pty, layout.clone()).fatal()

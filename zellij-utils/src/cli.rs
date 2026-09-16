@@ -79,6 +79,12 @@ pub struct CliArgs {
     #[serde(default)]
     pub server_foreground: bool,
 
+    /// Gezellij: this server is the in-place successor of an upgraded one; rebuild the session
+    /// described by this manifest around the inherited PTYs (implies --server-foreground)
+    #[clap(long, hide = true, requires = "server")]
+    #[serde(default)]
+    pub adopt: Option<PathBuf>,
+
     /// Specify name of a new session
     #[clap(long, short, overrides_with = "session", value_parser = validate_session)]
     pub session: Option<String>,
@@ -175,6 +181,26 @@ pub enum Command {
     /// Gezellij: resume a frozen session (or pane)
     #[clap(name = "thaw")]
     Thaw(FreezeCli),
+
+    /// Gezellij: upgrade a running session's server to the installed binary in place - the
+    /// processes in its panes keep running, attached clients must re-attach
+    #[clap(name = "upgrade-server")]
+    UpgradeServer(UpgradeServerCli),
+}
+
+#[derive(Debug, Parser, Clone, Serialize, Deserialize)]
+pub struct UpgradeServerCli {
+    /// Session to upgrade (defaults to --session, $ZELLIJ_SESSION_NAME, or the only active session)
+    #[clap(value_parser)]
+    pub session_name: Option<String>,
+
+    /// Upgrade even if the server's binary has not been replaced on disk
+    #[clap(long)]
+    pub force: bool,
+
+    /// Seconds to wait for the upgraded server to come back (default 30)
+    #[clap(long, value_parser)]
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Parser, Clone, Serialize, Deserialize)]

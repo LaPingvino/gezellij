@@ -164,7 +164,7 @@ fn make_pty_with_plugin_receiver(
     let mut bus: Bus<PtyInstruction> = Bus::empty().should_silently_fail();
     bus.os_input = Some(Box::new(mock));
     bus.senders.to_plugin = Some(plugin_sender);
-    let pty = Pty::new(bus, false, None, None);
+    let pty = Pty::new(bus, false, None, None, None);
     (pty, plugin_rx)
 }
 

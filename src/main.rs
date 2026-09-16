@@ -3,6 +3,7 @@ mod freeze_commands;
 mod service_commands;
 #[cfg(test)]
 mod tests;
+mod upgrade_commands;
 
 use clap::Parser;
 use zellij_utils::{
@@ -41,6 +42,10 @@ fn main() {
         }
         if let Some(Command::Thaw(freeze_cli)) = opts.command.clone() {
             freeze_commands::run(opts, freeze_cli, false);
+            std::process::exit(0);
+        }
+        if let Some(Command::UpgradeServer(upgrade_cli)) = opts.command.clone() {
+            upgrade_commands::run(opts, upgrade_cli);
             std::process::exit(0);
         }
         if let Some(Command::Sessions(Sessions::Run {
@@ -271,7 +276,7 @@ fn main() {
     {
         commands::delete_session(target_session, force);
     } else if let Some(path) = opts.server {
-        commands::start_server(path, opts.debug, opts.server_foreground);
+        commands::start_server(path, opts.debug, opts.server_foreground, opts.adopt.clone());
     } else if opts.layout.is_some() || opts.layout_string.is_some() {
         if let Some(session_name) = opts
             .session

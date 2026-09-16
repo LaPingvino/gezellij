@@ -127,6 +127,25 @@ fn serialize_tab(
     }
 }
 
+/// Gezellij: the `run` instructions of `tiled_panes` in exactly the order the pty thread will
+/// visit them after this layout has been serialized, re-parsed and applied again
+/// (`TiledPaneLayout::extract_run_instructions`). Used to correlate live PTYs with layout leaves
+/// during an in-place server upgrade.
+pub fn tiled_run_order(tiled_panes: &Vec<PaneLayoutManifest>) -> Vec<Option<Run>> {
+    match get_tiled_panes_layout_from_panegeoms(tiled_panes, None) {
+        Some(root) => {
+            let mut synthetic_root = TiledPaneLayout::default();
+            synthetic_root.children = tiled_panes_to_serialize(root);
+            if synthetic_root.children.is_empty() {
+                vec![]
+            } else {
+                synthetic_root.extract_run_instructions()
+            }
+        },
+        None => vec![],
+    }
+}
+
 fn tiled_panes_to_serialize(root: TiledPaneLayout) -> Vec<TiledPaneLayout> {
     let root_is_leaf = root.children.is_empty() && root.external_children_index.is_none();
     if root_is_leaf {

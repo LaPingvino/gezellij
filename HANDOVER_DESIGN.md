@@ -296,3 +296,45 @@ integration test that upgrades a session running `sleep 100000` and asserts the 
   with the fd (they belong to the pty, not the fd, so they should — untested).
 * `zellij service run` under `systemd --user` with `Delegate=yes` may put the new server in a
   different cgroup than the adopted children, which interacts with Phase 2 freezing.
+
+
+## 13. Implemented (2026-09-16): the exec-in-place variant
+
+The first working upgrade took the `--handover-mode=exec` road from §6 rather than the socket
+handover, because it dissolves three of the risks above at once: the successor *is* the same
+process (pid unchanged, so `systemd` keeps tracking it and every pane child stays a waitable
+child), no manifest has to cross a process boundary, and the layout/PTY correlation can be
+computed by the very serializer that writes the layout.
+
+Flow, as built:
+
+1. `zellij upgrade-server [session]` finds the server pid (`<sock dir>/<session>.server-pid`),
+   refuses if `/proc/<pid>/exe` is not `(deleted)` (unless `--force` or
+   `GEZELLIJ_UPGRADE_BINARY` is set), sends `SIGUSR2`, and waits until the pid's exe changed and
+   the manifest was consumed.
+2. The server's `upgrade_signal` thread turns the signal into `ServerInstruction::PrepareUpgrade`
+   → `ScreenInstruction::PrepareUpgrade`, which takes the normal `SessionLayoutMetadata` snapshot
+   with `upgrade_requested = true` and routes it through the plugin thread (plugin cwds) to the
+   pty thread like any save.
+3. `Pty::perform_exec_upgrade`: remembers each pane's original `RunCommand` (restart policy),
+   populates the snapshot, writes `session-layout.kdl` + pane contents, computes the
+   **adoption order** with `SessionLayoutMetadata::adoption_order` (the real tree builder is run
+   once more with a marker in every terminal pane's `run`, then `extract_run_instructions` gives
+   the exact order the successor will visit the leaves), builds `ExecUpgradeManifest`
+   (per tab: tiled and floating `AdoptablePane { terminal_id, fd, child_pid, run,
+   layout_command }`, plus the original `CliAssets` pointed at the new layout file), marks every
+   fd close-on-exec, clears it again on the PTY masters (`prepare_fds_for_exec`), and
+   `execve`s `<new binary> --server <sock> --adopt <manifest>`. If exec fails everything is
+   restored and the old server carries on.
+4. The successor (`--adopt` implies `--server-foreground`, never daemonize again) reads the
+   manifest, stores the adoption plan, and feeds itself `FirstClientConnected(cli_assets)` +
+   `RemoveClient`, i.e. a detached resurrection. In `spawn_terminals_for_layout` each leaf is
+   compared with the next inherited pane of that tab (`layout_command` must match; plugin leaves
+   never consume a slot); matches are adopted via `ServerOsApi::adopt_terminal` (registers the
+   master, re-arms CLOEXEC, starts a `waitpid` reaper that calls the same exit callback the
+   restart machinery uses), mismatches are spawned fresh and unclaimed PTYs are hung up.
+
+What this variant does *not* give: rollback after `exec` (a successor that fails to adopt leaves
+the session to be resurrected from the layout on disk), and attached clients are dropped rather
+than told to reconnect. Scrollback is not carried (per §5.1 of the plan). The socket transport in
+`host_fabric/handover.rs` remains the path to a rollback-safe variant.

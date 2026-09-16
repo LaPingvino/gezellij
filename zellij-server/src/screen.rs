@@ -830,6 +830,8 @@ pub enum ScreenInstruction {
         dangerously_enable_paste_buffer_read: bool,
     },
     RerunCommandPane(u32, Option<NotificationEnd>), // u32 - terminal pane id
+    /// Gezellij: snapshot the session for an in-place server upgrade (see pty thread)
+    PrepareUpgrade,
     ResizePaneWithId(ResizeStrategy, PaneId),
     EditScrollbackForPaneWithId(PaneId, Option<NotificationEnd>),
     WriteToPaneId(Vec<u8>, PaneId, Option<NotificationEnd>),
@@ -1214,6 +1216,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::GetCurrentTabInfo { .. } => ScreenContext::GetCurrentTabInfo,
             ScreenInstruction::Reconfigure { .. } => ScreenContext::Reconfigure,
             ScreenInstruction::RerunCommandPane { .. } => ScreenContext::RerunCommandPane,
+            ScreenInstruction::PrepareUpgrade => ScreenContext::PrepareUpgrade,
             ScreenInstruction::ResizePaneWithId(..) => ScreenContext::ResizePaneWithId,
             ScreenInstruction::EditScrollbackForPaneWithId(..) => {
                 ScreenContext::EditScrollbackForPaneWithId
@@ -11663,6 +11666,16 @@ pub(crate) fn screen_thread_main(
                     screen.reapply_effective_theme_mode().non_fatal();
                 }
                 screen.resolve_default_theme_mode().non_fatal();
+            },
+            ScreenInstruction::PrepareUpgrade => {
+                let mut session_layout_metadata =
+                    screen.get_layout_metadata(Some(screen.default_shell.clone()), None);
+                session_layout_metadata.upgrade_requested = true;
+                screen
+                    .bus
+                    .senders
+                    .send_to_plugin(PluginInstruction::LogLayoutToHd(session_layout_metadata))
+                    .context("failed to snapshot the session for an in-place upgrade")?;
             },
             ScreenInstruction::RerunCommandPane(terminal_pane_id, completion_tx) => {
                 screen.rerun_command_pane_with_id(terminal_pane_id, completion_tx)

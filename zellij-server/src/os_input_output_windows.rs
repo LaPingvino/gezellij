@@ -1,4 +1,4 @@
-use crate::os_input_output::{resolve_command, AsyncReader};
+use crate::os_input_output::{resolve_command, AsyncReader, RawFd};
 use crate::panes::PaneId;
 
 use std::{
@@ -663,6 +663,33 @@ impl WindowsPtyBackend {
             self.next_terminal_id_counter
                 .fetch_add(1, Ordering::Relaxed),
         )
+    }
+
+    /// Gezellij (handover 3.2): unsupported on Windows - ConPTY handles are not inheritable
+    /// across an in-place process replacement, and Windows has no `execve`.
+    pub fn adopt_terminal(
+        &self,
+        _terminal_id: u32,
+        _master_fd: RawFd,
+        _child_pid: Option<u32>,
+        _rows: u16,
+        _cols: u16,
+        _quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        _run_command: RunCommand,
+    ) -> Result<Box<dyn AsyncReader>> {
+        Err(anyhow!("terminal adoption is not supported on Windows"))
+    }
+
+    /// Gezellij (handover 3.2): unsupported on Windows - there are no pty master fds to hand over.
+    pub fn terminal_fd_table(&self) -> Vec<(u32, RawFd)> {
+        vec![]
+    }
+
+    /// Gezellij (handover 3.2): unsupported on Windows - there is no `execve` to survive.
+    pub fn prepare_fds_for_exec(&self, _fds: &[RawFd]) -> Result<()> {
+        Err(anyhow!(
+            "preparing fds for exec is not supported on Windows"
+        ))
     }
 }
 

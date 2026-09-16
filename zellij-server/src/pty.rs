@@ -15,6 +15,7 @@ use crate::{
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
 use tokio::task::JoinHandle;
+use zellij_utils::host_fabric::upgrade::{AdoptablePane, TabAdoption};
 use zellij_utils::{
     data::{
         CommandOrPlugin, Event, FloatingPaneCoordinates, GetPaneCwdResponse, GetPanePidResponse,
@@ -23,6 +24,7 @@ use zellij_utils::{
     errors::prelude::*,
     errors::{ContextType, PtyContext},
     input::{
+        cli_assets::CliAssets,
         command::{OpenFilePayload, RestartPolicy, RunCommand, TerminalAction},
         layout::{
             FloatingPaneLayout, Layout, Run, RunPluginOrAlias, SwapFloatingLayout, SwapTiledLayout,
@@ -211,6 +213,60 @@ pub(crate) struct Pty {
     terminal_foreground_cmds: HashMap<u32, Vec<String>>,
     /// Gezellij: per-terminal supervision state for command panes with a restart policy
     restart_tracker: RestartTracker,
+    /// Gezellij: what the first client handed us; re-used verbatim by an in-place upgrade
+    cli_assets: Option<CliAssets>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gezellij: in-place server upgrade - adoption plan handed from `lib.rs` (`--adopt`) to the pty
+// thread, consumed tab by tab while the resurrected layout is applied.
+// ---------------------------------------------------------------------------------------------
+static ADOPTION_PLAN: std::sync::OnceLock<std::sync::Mutex<Vec<Option<TabAdoption>>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn set_adoption_plan(tabs: Vec<TabAdoption>) {
+    let plan = ADOPTION_PLAN.get_or_init(|| std::sync::Mutex::new(vec![]));
+    if let Ok(mut plan) = plan.lock() {
+        *plan = tabs.into_iter().map(Some).collect();
+    }
+}
+
+fn take_tab_adoption(tab_index: usize) -> Option<TabAdoption> {
+    let plan = ADOPTION_PLAN.get()?;
+    let mut plan = plan.lock().ok()?;
+    plan.get_mut(tab_index).and_then(|slot| slot.take())
+}
+
+fn layout_command_of(run: &Option<Run>) -> Option<Vec<String>> {
+    match run {
+        Some(Run::Command(run_command)) => {
+            let mut command = vec![run_command.command.display().to_string()];
+            command.extend(run_command.args.iter().cloned());
+            Some(command)
+        },
+        _ => None,
+    }
+}
+
+/// Mark every open descriptor (except stdio) close-on-exec, so an in-place exec carries over
+/// nothing but the PTY masters we explicitly un-mark afterwards (slaves, sockets, log files all
+/// close).
+#[cfg(unix)]
+fn set_all_fds_cloexec() {
+    if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+        for entry in entries.flatten() {
+            if let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() {
+                if fd > 2 {
+                    unsafe {
+                        let flags = libc::fcntl(fd, libc::F_GETFD);
+                        if flags >= 0 {
+                            libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Gezellij: supervision bookkeeping for command panes that carry a [`RestartPolicy`].
@@ -819,6 +875,15 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
             },
             PtyInstruction::LogLayoutToHd(mut session_layout_metadata) => {
                 let err_context = || format!("Failed to dump layout");
+                if session_layout_metadata.upgrade_requested {
+                    // Gezellij: this snapshot was requested for an in-place upgrade. On success
+                    // this call never returns (we exec the new binary); on failure we log and
+                    // keep running exactly as before.
+                    if let Err(e) = pty.perform_exec_upgrade(session_layout_metadata) {
+                        log::error!("in-place upgrade aborted, server keeps running: {:#}", e);
+                    }
+                    continue;
+                }
                 pty.populate_session_layout_metadata(&mut session_layout_metadata);
                 if session_layout_metadata.is_dirty() {
                     match session_serialization::serialize_session_layout(
@@ -958,6 +1023,7 @@ impl Pty {
         debug_to_file: bool,
         default_editor: Option<PathBuf>,
         post_command_discovery_hook: Option<String>,
+        cli_assets: Option<CliAssets>,
     ) -> Self {
         Pty {
             active_panes: HashMap::new(),
@@ -968,6 +1034,7 @@ impl Pty {
             default_editor,
             originating_plugins: HashMap::new(),
             restart_tracker: Default::default(),
+            cli_assets,
             post_command_discovery_hook,
             plugin_cwds: HashMap::new(),
             terminal_cwds: HashMap::new(),
@@ -1276,6 +1343,228 @@ impl Pty {
         let starts_held = false;
         Ok((terminal_id, starts_held))
     }
+    /// Gezellij: adopt the next inherited pane of `queue` if it is the pane this layout leaf
+    /// describes; returns the same tuple `apply_run_instruction` would.
+    fn try_adopt_pane(
+        &mut self,
+        queue: &mut std::collections::VecDeque<AdoptablePane>,
+        run_instruction: &Option<Run>,
+    ) -> Option<(u32, bool, Option<RunCommand>, Result<Box<dyn AsyncReader>>)> {
+        if matches!(run_instruction, Some(Run::Plugin(_))) {
+            return None; // plugins are not terminals and never consume an adoption slot
+        }
+        let candidate = queue.front()?;
+        let leaf_command = layout_command_of(run_instruction);
+        if leaf_command != candidate.layout_command {
+            log::warn!(
+                "upgrade: layout leaf {:?} does not match inherited pane terminal_{} ({:?}); spawning it fresh",
+                leaf_command,
+                candidate.terminal_id,
+                candidate.layout_command
+            );
+            return None;
+        }
+        let pane = queue.pop_front()?;
+        let run_command = pane.run.clone().unwrap_or_else(|| match run_instruction {
+            Some(Run::Command(run_command)) => run_command.clone(),
+            _ => RunCommand::new(PathBuf::from(
+                pane.layout_command
+                    .as_ref()
+                    .and_then(|c| c.first().cloned())
+                    .unwrap_or_else(|| "sh".to_string()),
+            )),
+        });
+        let quit_cb =
+            self.command_exit_callback(run_command.hold_on_close, run_command.restart, None, None);
+        let adopted = self
+            .bus
+            .os_input
+            .as_mut()
+            .context("no OS I/O interface found")
+            .and_then(|os_input| {
+                os_input.adopt_terminal(
+                    pane.terminal_id,
+                    pane.fd,
+                    pane.child_pid,
+                    24,
+                    80,
+                    quit_cb,
+                    run_command.clone(),
+                )
+            });
+        match adopted {
+            Ok(reader) => {
+                log::info!(
+                    "upgrade: adopted terminal_{} (pid {:?}, {})",
+                    pane.terminal_id,
+                    pane.child_pid,
+                    run_command
+                );
+                if let Some(child_pid) = pane.child_pid {
+                    self.id_to_child_pid.insert(pane.terminal_id, child_pid);
+                    self.capture_initial_cwd(pane.terminal_id, child_pid);
+                }
+                self.note_command_started(pane.terminal_id);
+                Some((pane.terminal_id, false, None, Ok(reader)))
+            },
+            Err(e) => {
+                log::error!(
+                    "upgrade: could not adopt terminal_{}: {:#}; spawning it fresh",
+                    pane.terminal_id,
+                    e
+                );
+                None
+            },
+        }
+    }
+    /// Gezellij: inherited panes nobody adopted would otherwise linger invisibly; closing their
+    /// masters hangs them up like a closed pane would.
+    fn release_unadopted_panes(&self, leftovers: impl Iterator<Item = AdoptablePane>) {
+        for pane in leftovers {
+            log::warn!(
+                "upgrade: no layout leaf claimed inherited terminal_{} (pid {:?}); hanging it up",
+                pane.terminal_id,
+                pane.child_pid
+            );
+            let _ = nix::unistd::close(pane.fd);
+        }
+    }
+    /// Gezellij: snapshot the session and `execve` the new binary in place. Returns only on
+    /// failure (with everything restored), never on success.
+    #[cfg(unix)]
+    fn perform_exec_upgrade(&mut self, mut metadata: SessionLayoutMetadata) -> Result<()> {
+        use std::os::unix::process::CommandExt;
+        use zellij_utils::consts::{session_info_folder_for_session, VERSION, ZELLIJ_SOCK_DIR};
+        use zellij_utils::data::LayoutMetadata;
+        use zellij_utils::host_fabric::upgrade::{
+            upgrade_binary_path, write_exec_manifest, ExecUpgradeManifest,
+            EXEC_UPGRADE_PROTOCOL_VERSION,
+        };
+
+        let session_name =
+            zellij_utils::envs::get_session_name().context("server has no session name")?;
+        let new_binary =
+            upgrade_binary_path().ok_or_else(|| anyhow!("no upgrade binary path is known"))?;
+        if !new_binary.is_file() {
+            return Err(anyhow!(
+                "upgrade binary {} does not exist",
+                new_binary.display()
+            ));
+        }
+        let mut cli_assets = self
+            .cli_assets
+            .clone()
+            .ok_or_else(|| anyhow!("no client assets recorded for this session"))?;
+
+        // 1. what each pane was asked to run (with its restart policy), before the snapshot is
+        //    rewritten with the foreground commands
+        let original_runs = metadata.terminal_runs();
+        self.populate_session_layout_metadata(&mut metadata);
+        let layout_commands = metadata.terminal_layout_commands();
+        let order = metadata.adoption_order();
+
+        // 2. the resurrection layout on disk, exactly like a normal save
+        let (kdl, pane_contents) = session_serialization::serialize_session_layout(metadata.into())
+            .map_err(|e| anyhow!("could not serialize the session layout: {}", e))?;
+        let folder = session_info_folder_for_session(&session_name);
+        std::fs::create_dir_all(&folder)?;
+        let layout_file = folder.join("session-layout.kdl");
+        std::fs::write(&layout_file, kdl)?;
+        for (file_name, contents) in pane_contents {
+            std::fs::write(folder.join(file_name), contents)?;
+        }
+
+        // 3. which live PTYs belong to which leaves
+        let fd_table: HashMap<u32, i32> = self
+            .bus
+            .os_input
+            .as_ref()
+            .context("no OS I/O interface found")?
+            .terminal_fd_table()
+            .into_iter()
+            .collect();
+        let describe = |id: &u32| -> Option<AdoptablePane> {
+            // held / never-started panes have no pty and are simply respawned held
+            let fd = *fd_table.get(id)?;
+            Some(AdoptablePane {
+                terminal_id: *id,
+                fd,
+                child_pid: self.id_to_child_pid.get(id).copied(),
+                run: original_runs.get(id).cloned().flatten(),
+                layout_command: layout_commands.get(id).cloned().flatten(),
+            })
+        };
+        let tabs: Vec<TabAdoption> = order
+            .iter()
+            .map(|(tiled, floating)| TabAdoption {
+                tiled: tiled.iter().filter_map(describe).collect(),
+                floating: floating.iter().filter_map(describe).collect(),
+            })
+            .collect();
+
+        cli_assets.layout = Some(zellij_utils::data::LayoutInfo::File(
+            layout_file.display().to_string(),
+            LayoutMetadata::default(),
+        ));
+        cli_assets.initial_panes = None;
+        cli_assets.force_run_layout_commands = false;
+        let manifest = ExecUpgradeManifest {
+            protocol_version: EXEC_UPGRADE_PROTOCOL_VERSION,
+            session_name: session_name.clone(),
+            old_server_version: VERSION.to_string(),
+            old_server_pid: std::process::id(),
+            cli_assets,
+            layout_file,
+            tabs,
+        };
+        let fds = manifest.all_fds();
+        let manifest_path = write_exec_manifest(&manifest)?;
+        log::info!(
+            "upgrade: handing {} panes to {} via {}",
+            fds.len(),
+            new_binary.display(),
+            manifest_path.display()
+        );
+
+        // 4. carry nothing but the masters across exec, then become the new binary
+        set_all_fds_cloexec();
+        self.bus
+            .os_input
+            .as_ref()
+            .context("no OS I/O interface found")?
+            .prepare_fds_for_exec(&fds)?;
+        let socket_path = ZELLIJ_SOCK_DIR.join(&session_name);
+        let mut command = std::process::Command::new(&new_binary);
+        command
+            .arg("--server")
+            .arg(&socket_path)
+            .arg("--adopt")
+            .arg(&manifest_path);
+        if self.debug_to_file {
+            command.arg("--debug");
+        }
+        let exec_error = command.exec();
+
+        // only reached when exec failed: undo what we can
+        for fd in &fds {
+            unsafe {
+                let flags = libc::fcntl(*fd, libc::F_GETFD);
+                if flags >= 0 {
+                    libc::fcntl(*fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&manifest_path);
+        Err(anyhow!(
+            "exec of {} failed: {}",
+            new_binary.display(),
+            exec_error
+        ))
+    }
+    #[cfg(not(unix))]
+    fn perform_exec_upgrade(&mut self, _metadata: SessionLayoutMetadata) -> Result<()> {
+        Err(anyhow!("in-place upgrade is only supported on unix"))
+    }
     pub fn spawn_terminals_for_layout(
         &mut self,
         cwd: Option<PathBuf>,
@@ -1343,6 +1632,19 @@ impl Pty {
 
         let mut originating_plugins_to_inform = vec![];
 
+        // Gezellij: after an in-place upgrade, panes that are still alive in inherited PTYs are
+        // adopted instead of spawned, in the order the manifest recorded for this tab.
+        let (mut adopt_tiled, mut adopt_floating) = match take_tab_adoption(tab_index) {
+            Some(tab_adoption) => (
+                std::collections::VecDeque::from(tab_adoption.tiled),
+                std::collections::VecDeque::from(tab_adoption.floating),
+            ),
+            None => (
+                std::collections::VecDeque::new(),
+                std::collections::VecDeque::new(),
+            ),
+        };
+
         for run_instruction in extracted_run_instructions {
             let originating_plugin = run_instruction.as_ref().and_then(|r| {
                 if let Run::Command(run_command) = r {
@@ -1352,6 +1654,10 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
+            if let Some(adopted) = self.try_adopt_pane(&mut adopt_tiled, &run_instruction) {
+                new_pane_pids.push(adopted);
+                continue;
+            }
             if let Some(new_pane_data) =
                 self.apply_run_instruction(run_instruction, default_shell.clone())?
             {
@@ -1372,6 +1678,10 @@ impl Pty {
                 }
             });
             let mut terminal_id = None;
+            if let Some(adopted) = self.try_adopt_pane(&mut adopt_floating, &run_instruction) {
+                new_floating_panes_pids.push(adopted);
+                continue;
+            }
             if let Some(new_pane_data) =
                 self.apply_run_instruction(run_instruction, default_shell.clone())?
             {
@@ -1383,6 +1693,8 @@ impl Pty {
                 originating_plugins_to_inform.push((terminal_id, originating_plugin));
             }
         }
+
+        self.release_unadopted_panes(adopt_tiled.into_iter().chain(adopt_floating.into_iter()));
 
         // Option<RunCommand> should only be Some if the pane starts held
         let new_tab_pane_ids: Vec<(u32, Option<RunCommand>)> = new_pane_pids

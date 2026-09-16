@@ -23,6 +23,98 @@ pub struct SessionLayoutMetadata {
     pub default_shell: Option<PathBuf>,
     pub default_editor: Option<PathBuf>,
     tabs: Vec<TabLayoutMetadata>,
+    /// Gezellij: set when this snapshot was taken to perform an in-place server upgrade rather
+    /// than a routine save; the pty thread then execs the new binary instead of writing to disk.
+    pub upgrade_requested: bool,
+}
+
+/// Gezellij: helpers for the in-place server upgrade (see `zellij_utils::host_fabric::upgrade`).
+impl SessionLayoutMetadata {
+    fn layout_command_of(run: &Option<Run>) -> Option<Vec<String>> {
+        match run {
+            Some(Run::Command(run_command)) => {
+                let mut command = vec![run_command.command.display().to_string()];
+                command.extend(run_command.args.iter().cloned());
+                Some(command)
+            },
+            _ => None,
+        }
+    }
+    /// The `RunCommand` each terminal pane was originally started with (carries the restart
+    /// policy), before the snapshot is rewritten with whatever is running in the foreground.
+    pub fn terminal_runs(&self) -> HashMap<u32, Option<RunCommand>> {
+        let mut runs = HashMap::new();
+        for tab in &self.tabs {
+            for pane in tab.tiled_panes.iter().chain(tab.floating_panes.iter()) {
+                if let PaneId::Terminal(id) = pane.id {
+                    let run = match &pane.run {
+                        Some(Run::Command(run_command)) => Some(run_command.clone()),
+                        _ => None,
+                    };
+                    runs.insert(id, run);
+                }
+            }
+        }
+        runs
+    }
+    /// The command each terminal pane will carry in the serialized layout (`None` = shell).
+    pub fn terminal_layout_commands(&self) -> HashMap<u32, Option<Vec<String>>> {
+        let mut commands = HashMap::new();
+        for tab in &self.tabs {
+            for pane in tab.tiled_panes.iter().chain(tab.floating_panes.iter()) {
+                if let PaneId::Terminal(id) = pane.id {
+                    commands.insert(id, Self::layout_command_of(&pane.run));
+                }
+            }
+        }
+        commands
+    }
+    /// Per tab, the terminal ids in the exact order the pty thread will visit the layout's leaves
+    /// after a serialize/parse round trip: (tiled, floating). Computed by running the real
+    /// serializer's tree builder with a marker in each terminal pane's `run`.
+    pub fn adoption_order(&self) -> Vec<(Vec<u32>, Vec<u32>)> {
+        const MARKER: &str = "__gezellij_adopt__/";
+        self.tabs
+            .iter()
+            .map(|tab| {
+                let manifests: Vec<PaneLayoutManifest> = tab
+                    .tiled_panes
+                    .iter()
+                    .map(|pane| {
+                        let mut manifest: PaneLayoutManifest = pane.clone().into();
+                        if let PaneId::Terminal(id) = pane.id {
+                            manifest.run = Some(Run::Command(RunCommand::new(PathBuf::from(
+                                format!("{}{}", MARKER, id),
+                            ))));
+                            manifest.cwd = None;
+                        }
+                        manifest
+                    })
+                    .collect();
+                let tiled: Vec<u32> =
+                    zellij_utils::session_serialization::tiled_run_order(&manifests)
+                        .into_iter()
+                        .filter_map(|run| match run {
+                            Some(Run::Command(run_command)) => run_command
+                                .command
+                                .to_string_lossy()
+                                .strip_prefix(MARKER)
+                                .and_then(|id| id.parse::<u32>().ok()),
+                            _ => None,
+                        })
+                        .collect();
+                let floating: Vec<u32> = tab
+                    .floating_panes
+                    .iter()
+                    .filter_map(|pane| match pane.id {
+                        PaneId::Terminal(id) => Some(id),
+                        _ => None,
+                    })
+                    .collect();
+                (tiled, floating)
+            })
+            .collect()
+    }
 }
 
 impl SessionLayoutMetadata {

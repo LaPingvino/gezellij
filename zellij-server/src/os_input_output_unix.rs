@@ -2,11 +2,13 @@ use crate::os_input_output::{command_exists, AsyncReader};
 use crate::panes::PaneId;
 
 use nix::{
-    fcntl::{fcntl, FcntlArg, OFlag},
+    errno::Errno,
+    fcntl::{fcntl, FcntlArg, FdFlag, OFlag},
     pty::{openpty, OpenptyResult, Winsize},
     sys::{
         signal::{kill, Signal},
         termios,
+        wait::{waitpid, WaitStatus},
     },
     unistd,
 };
@@ -221,6 +223,95 @@ pub fn cleanup_pane_cgroups() {
             tree.remove_all(&session_name);
         }
     }
+}
+
+/// Gezellij (handover 3.2): set or clear `FD_CLOEXEC` on a single fd, leaving its other
+/// descriptor flags alone.
+fn set_cloexec(fd: RawFd, on: bool) -> Result<()> {
+    let err_context = || format!("failed to change FD_CLOEXEC on fd {}", fd);
+    let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+    let flags = fcntl(borrowed_fd, FcntlArg::F_GETFD).with_context(err_context)?;
+    let mut fd_flags = FdFlag::from_bits_truncate(flags);
+    if on {
+        fd_flags.insert(FdFlag::FD_CLOEXEC);
+    } else {
+        fd_flags.remove(FdFlag::FD_CLOEXEC);
+    }
+    fcntl(borrowed_fd, FcntlArg::F_SETFD(fd_flags)).with_context(err_context)?;
+    Ok(())
+}
+
+/// Gezellij (handover 3.2): the reaper for an *adopted* pane child.
+///
+/// After an in-place `execve` upgrade the pid is unchanged, so the pane's child is still our
+/// child and `waitpid` gives us a real exit status - exactly like the `child.wait()` reaper that
+/// `handle_openpty` spawns for a freshly forked pane. If it is *not* our child (`ECHILD` - e.g. a
+/// future socket-handover mode, where the children were reparented to init), we degrade to
+/// polling `kill(pid, 0)` and report an unknown exit status, which
+/// `RestartPolicy::should_restart(None)` already handles.
+fn spawn_adopted_reaper(
+    terminal_id: u32,
+    child_pid: u32,
+    quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+    run_command: RunCommand,
+) {
+    thread::spawn(move || {
+        let pid = unistd::Pid::from_raw(child_pid as i32);
+        let mut waitable = true;
+        let exit_status = loop {
+            match waitpid(pid, None) {
+                Ok(WaitStatus::Exited(_, exit_code)) => break Some(exit_code),
+                Ok(WaitStatus::Signaled(..)) => break None,
+                // stopped/continued/ptrace stops: the process is still around, keep waiting
+                Ok(_) => continue,
+                Err(Errno::EINTR) => continue,
+                Err(Errno::ECHILD) => {
+                    waitable = false;
+                    break None;
+                },
+                Err(e) => {
+                    log::error!(
+                        "waitpid on adopted pane {} (pid {}) failed: {}",
+                        terminal_id,
+                        child_pid,
+                        e
+                    );
+                    break None;
+                },
+            }
+        };
+        if waitable {
+            log::info!(
+                "adopted pane {} (pid {}) exited with {:?} (reaped with waitpid)",
+                terminal_id,
+                child_pid,
+                exit_status
+            );
+        } else {
+            log::info!(
+                "adopted pane {} (pid {}) is not our child (ECHILD); falling back to kill(pid, 0) liveness polling, exit status will be unknown",
+                terminal_id,
+                child_pid
+            );
+            loop {
+                match kill(pid, None::<Signal>) {
+                    Err(Errno::ESRCH) => break,
+                    _ => thread::sleep(Duration::from_millis(250)),
+                }
+            }
+            log::info!(
+                "adopted pane {} (pid {}) is gone (liveness poll)",
+                terminal_id,
+                child_pid
+            );
+        }
+        quit_cb(PaneId::Terminal(terminal_id), exit_status, run_command);
+        // Gezellij: same tidy-up as the reaper in `handle_openpty` - after an in-place exec the
+        // pane's cgroup is still there (same session, same tree)
+        if let Some(tree) = pane_cgroups().as_ref() {
+            let _ = tree.remove_pane(terminal_id);
+        }
+    });
 }
 
 fn handle_openpty(
@@ -526,6 +617,88 @@ impl UnixPtyBackend {
                 .fetch_add(1, Ordering::Relaxed),
         )
     }
+
+    /// Gezellij (handover 3.2): adopt an already-open PTY master (and, if given, the
+    /// already-running child behind it) instead of forking a new one.
+    ///
+    /// Registers `master_fd` under `terminal_id`, raises `next_terminal_id_counter` above
+    /// `terminal_id` so a later `next_terminal_id()` cannot collide with an adopted pane,
+    /// re-applies the pane geometry (the resurrected layout may compute a slightly different one
+    /// than the old server had), puts `FD_CLOEXEC` back on the fd (it was cleared so it would
+    /// survive `execve`) and returns the same kind of async reader `spawn_terminal` returns.
+    pub fn adopt_terminal(
+        &self,
+        terminal_id: u32,
+        master_fd: RawFd,
+        child_pid: Option<u32>,
+        rows: u16,
+        cols: u16,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        run_command: RunCommand,
+    ) -> Result<Box<dyn AsyncReader>> {
+        let err_context = || {
+            format!(
+                "failed to adopt terminal {} (fd {})",
+                terminal_id, master_fd
+            )
+        };
+
+        // every fallible step happens before we register anything or start the reaper, so a bad
+        // manifest fd leaves no half-adopted pane behind. The CLOEXEC round-trip doubles as the
+        // validity check on the fd: it travelled through `execve` with FD_CLOEXEC cleared, and we
+        // put it back so it does not leak into panes we spawn from here on.
+        set_cloexec(master_fd, true).with_context(err_context)?;
+        let async_reader = Box::new(
+            RawFdAsyncReader::new(master_fd)
+                .map_err(|e| anyhow!("failed to create async reader: {}", e))?,
+        ) as Box<dyn AsyncReader>;
+
+        self.terminal_id_to_raw_fd
+            .lock()
+            .to_anyhow()
+            .with_context(err_context)?
+            .insert(terminal_id, Some(master_fd));
+
+        // never hand out an id that an adopted pane already occupies
+        self.next_terminal_id_counter
+            .fetch_max(terminal_id.saturating_add(1), Ordering::Relaxed);
+
+        if cols > 0 && rows > 0 {
+            set_terminal_size_using_fd(master_fd, cols, rows, None, None);
+        }
+
+        if let Some(child_pid) = child_pid {
+            spawn_adopted_reaper(terminal_id, child_pid, quit_cb, run_command);
+        }
+
+        Ok(async_reader)
+    }
+
+    /// Gezellij (handover 3.2): a snapshot of the live PTY masters, for building the handover
+    /// manifest. Reserved-but-not-yet-opened terminal ids (`None` entries) are skipped.
+    pub fn terminal_fd_table(&self) -> Vec<(u32, RawFd)> {
+        match self.terminal_id_to_raw_fd.lock() {
+            Ok(terminal_id_to_raw_fd) => terminal_id_to_raw_fd
+                .iter()
+                .filter_map(|(terminal_id, fd)| fd.map(|fd| (*terminal_id, fd)))
+                .collect(),
+            Err(e) => {
+                log::error!("failed to lock terminal fd table: {}", e);
+                vec![]
+            },
+        }
+    }
+
+    /// Gezellij (handover 3.2): clear `FD_CLOEXEC` on exactly these fds so they survive the
+    /// `execve` into the new server binary. Every other fd in the process keeps its own
+    /// close-on-exec state.
+    pub fn prepare_fds_for_exec(&self, fds: &[RawFd]) -> Result<()> {
+        for fd in fds {
+            set_cloexec(*fd, false)
+                .with_context(|| format!("failed to prepare fd {} for exec", fd))?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -642,5 +815,204 @@ mod tests {
             libc::close(master_fd);
             libc::close(slave_fd);
         }
+    }
+
+    // --- Gezellij (handover 3.2): PTY/child adoption ---------------------------------------
+
+    fn cloexec_is_set(fd: RawFd) -> bool {
+        let flags = fcntl(unsafe { BorrowedFd::borrow_raw(fd) }, FcntlArg::F_GETFD)
+            .expect("F_GETFD failed");
+        FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC)
+    }
+
+    fn run_command_for_test(script: &str) -> RunCommand {
+        RunCommand {
+            command: std::path::PathBuf::from("sh"),
+            args: vec!["-c".to_string(), script.to_string()],
+            ..Default::default()
+        }
+    }
+
+    /// Spawn `sh -c <script>` on the slave side of an already-opened pty, the way
+    /// `handle_openpty` does, and return (master_fd, child_pid). The parent's copy of the slave
+    /// is closed, so the master sees EOF/EIO once the child is gone.
+    fn spawn_on_pty(script: &str) -> (RawFd, u32) {
+        let pty = openpty(None, &None).expect("openpty failed");
+        let master_fd = pty.master.into_raw_fd();
+        let slave_fd = pty.slave.into_raw_fd();
+        let child = unsafe {
+            Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .pre_exec(move || -> io::Result<()> {
+                    if libc::login_tty(slave_fd) != 0 {
+                        panic!("failed to set controlling terminal");
+                    }
+                    Ok(())
+                })
+                .spawn()
+                .expect("failed to spawn test child")
+        };
+        let child_pid = child.id();
+        // the reaper thread inside `adopt_terminal` is the only waiter; dropping `Child` here does
+        // not reap
+        std::mem::forget(child);
+        let _ = unistd::close(slave_fd);
+        (master_fd, child_pid)
+    }
+
+    /// The core of handover step 3.2: a master fd plus a running child that were handed to us
+    /// (here: freshly made, but the backend cannot tell the difference after an in-place
+    /// `execve`) become a working pane - we read its output through the returned `AsyncReader`
+    /// and get its real exit status through `quit_cb`.
+    #[test]
+    fn adopt_terminal_reads_output_and_reaps_child() {
+        let (master_fd, child_pid) = spawn_on_pty("echo hello; sleep 0.3");
+        let backend = UnixPtyBackend::new().expect("backend");
+        let (quit_tx, quit_rx) = std::sync::mpsc::channel();
+        let mut reader = backend
+            .adopt_terminal(
+                3,
+                master_fd,
+                Some(child_pid),
+                24,
+                80,
+                Box::new(move |pane_id, exit_status, _cmd| {
+                    let _ = quit_tx.send((pane_id, exit_status));
+                }),
+                run_command_for_test("echo hello; sleep 0.3"),
+            )
+            .expect("adopt_terminal failed");
+
+        // the adopted fd is put back into close-on-exec state
+        assert!(
+            cloexec_is_set(master_fd),
+            "adopt_terminal should re-arm FD_CLOEXEC on the adopted master"
+        );
+
+        let output = crate::global_async_runtime::get_tokio_runtime().block_on(async {
+            let mut collected = String::new();
+            let _ = tokio::time::timeout(Duration::from_secs(3), async {
+                let mut buf = [0u8; 1024];
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            collected.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            if collected.contains("hello") {
+                                break;
+                            }
+                        },
+                        // EIO once the last slave side is gone
+                        Err(_) => break,
+                    }
+                }
+            })
+            .await;
+            collected
+        });
+        assert!(
+            output.contains("hello"),
+            "expected to read 'hello' from the adopted pty, got {:?}",
+            output
+        );
+
+        let (pane_id, exit_status) = quit_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("quit_cb was not called for the adopted child");
+        assert_eq!(pane_id, PaneId::Terminal(3));
+        assert_eq!(exit_status, Some(0));
+
+        drop(reader); // closes the master
+    }
+
+    /// A pane id that arrived in a handover manifest must never be handed out again.
+    #[test]
+    fn adopt_terminal_advances_next_terminal_id() {
+        let pty = openpty(None, &None).expect("openpty failed");
+        let master_fd = pty.master.into_raw_fd();
+        let slave_fd = pty.slave.into_raw_fd();
+        let backend = UnixPtyBackend::new().expect("backend");
+        assert_eq!(backend.next_terminal_id(), Some(0));
+        let reader = backend
+            .adopt_terminal(
+                41,
+                master_fd,
+                None,
+                24,
+                80,
+                Box::new(|_, _, _| {}),
+                run_command_for_test("true"),
+            )
+            .expect("adopt_terminal failed");
+        assert_eq!(
+            backend.next_terminal_id(),
+            Some(42),
+            "next_terminal_id must not collide with an adopted id"
+        );
+        drop(reader);
+        let _ = unistd::close(slave_fd);
+    }
+
+    /// `prepare_fds_for_exec` clears close-on-exec on exactly the fds it is given.
+    #[test]
+    fn prepare_fds_for_exec_clears_cloexec_only_for_listed_fds() {
+        let pty = openpty(None, &None).expect("openpty failed");
+        let master_fd = pty.master.into_raw_fd();
+        let slave_fd = pty.slave.into_raw_fd();
+        // openpty does not set FD_CLOEXEC, so arm it explicitly first
+        super::set_cloexec(master_fd, true).expect("set_cloexec");
+        assert!(cloexec_is_set(master_fd));
+
+        // std opens files with O_CLOEXEC: our untouched control
+        let unrelated = File::open("/dev/null").expect("open /dev/null");
+        let unrelated_fd = unrelated.as_raw_fd();
+        assert!(cloexec_is_set(unrelated_fd));
+
+        let backend = UnixPtyBackend::new().expect("backend");
+        backend
+            .prepare_fds_for_exec(&[master_fd])
+            .expect("prepare_fds_for_exec failed");
+
+        assert!(
+            !cloexec_is_set(master_fd),
+            "listed fd should survive execve"
+        );
+        assert!(
+            cloexec_is_set(unrelated_fd),
+            "unlisted fd must keep its close-on-exec state"
+        );
+
+        drop(unrelated);
+        unsafe {
+            libc::close(master_fd);
+            libc::close(slave_fd);
+        }
+    }
+
+    /// The manifest source: adopted (and spawned) terminals show up, reserved-but-unopened ones
+    /// do not.
+    #[test]
+    fn terminal_fd_table_lists_adopted_fd() {
+        let pty = openpty(None, &None).expect("openpty failed");
+        let master_fd = pty.master.into_raw_fd();
+        let slave_fd = pty.slave.into_raw_fd();
+        let backend = UnixPtyBackend::new().expect("backend");
+        assert!(backend.terminal_fd_table().is_empty());
+        backend.reserve_terminal_id(9); // reserved, no fd yet
+        let reader = backend
+            .adopt_terminal(
+                5,
+                master_fd,
+                None,
+                24,
+                80,
+                Box::new(|_, _, _| {}),
+                run_command_for_test("true"),
+            )
+            .expect("adopt_terminal failed");
+        assert_eq!(backend.terminal_fd_table(), vec![(5, master_fd)]);
+        drop(reader);
+        let _ = unistd::close(slave_fd);
     }
 }

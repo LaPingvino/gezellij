@@ -35,6 +35,13 @@ use std::{
 
 pub use async_trait::async_trait;
 
+/// Gezellij (handover 3.2): a raw file descriptor as the handover primitives speak it. Windows has
+/// no such thing - the stubs there take the same integer and refuse.
+#[cfg(not(windows))]
+pub use std::os::unix::io::RawFd;
+#[cfg(windows)]
+pub type RawFd = i32;
+
 /// Check whether a candidate path refers to an executable file, considering
 /// PATHEXT extensions on Windows (e.g. `.exe`, `.cmd`).
 ///
@@ -377,6 +384,38 @@ pub trait ServerOsApi: Send + Sync {
     fn clear_terminal_id(&self, terminal_id: u32) -> Result<()>;
     fn cache_resizes(&mut self) {}
     fn apply_cached_resizes(&mut self) {}
+
+    /// Gezellij (handover 3.2): adopt an already-open PTY master - and, when `child_pid` is given,
+    /// the already-running process behind it - instead of spawning a fresh one. Used by the new
+    /// server after an in-place `execve` upgrade, where the pid is unchanged so the pane children
+    /// are still ours and still waitable. Returns the async reader for the pane's output, exactly
+    /// like `spawn_terminal` does for a fresh pty.
+    fn adopt_terminal(
+        &self,
+        _terminal_id: u32,
+        _master_fd: RawFd,
+        _child_pid: Option<u32>,
+        _rows: u16,
+        _cols: u16,
+        _quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        _run_command: RunCommand,
+    ) -> Result<Box<dyn AsyncReader>> {
+        Err(anyhow!(
+            "terminal adoption is not supported on this backend"
+        ))
+    }
+    /// Gezellij (handover 3.2): `(terminal_id, pty master fd)` for every live terminal, for
+    /// building the handover manifest.
+    fn terminal_fd_table(&self) -> Vec<(u32, RawFd)> {
+        vec![]
+    }
+    /// Gezellij (handover 3.2): clear the close-on-exec flag on exactly these fds so they survive
+    /// the `execve` into the new server binary.
+    fn prepare_fds_for_exec(&self, _fds: &[RawFd]) -> Result<()> {
+        Err(anyhow!(
+            "preparing fds for exec is not supported on this backend"
+        ))
+    }
 }
 
 impl ServerOsApi for ServerOsInputOutput {
@@ -676,6 +715,32 @@ impl ServerOsApi for ServerOsInputOutput {
     fn clear_terminal_id(&self, terminal_id: u32) -> Result<()> {
         self.pty_backend.clear_terminal_id(terminal_id);
         Ok(())
+    }
+    fn adopt_terminal(
+        &self,
+        terminal_id: u32,
+        master_fd: RawFd,
+        child_pid: Option<u32>,
+        rows: u16,
+        cols: u16,
+        quit_cb: Box<dyn Fn(PaneId, Option<i32>, RunCommand) + Send>,
+        run_command: RunCommand,
+    ) -> Result<Box<dyn AsyncReader>> {
+        self.pty_backend.adopt_terminal(
+            terminal_id,
+            master_fd,
+            child_pid,
+            rows,
+            cols,
+            quit_cb,
+            run_command,
+        )
+    }
+    fn terminal_fd_table(&self) -> Vec<(u32, RawFd)> {
+        self.pty_backend.terminal_fd_table()
+    }
+    fn prepare_fds_for_exec(&self, fds: &[RawFd]) -> Result<()> {
+        self.pty_backend.prepare_fds_for_exec(fds)
     }
     fn cache_resizes(&mut self) {
         if self.cached_resizes.lock().unwrap().is_none() {

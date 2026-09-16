@@ -168,10 +168,15 @@ fn get_os_input<OsInputOutput>(
     }
 }
 
-pub(crate) fn start_server(path: PathBuf, debug: bool, foreground: bool) {
+pub(crate) fn start_server(path: PathBuf, debug: bool, foreground: bool, adopt: Option<PathBuf>) {
     // Set instance-wide debug mode
     zellij_utils::consts::DEBUG_MODE.set(debug).unwrap();
     let os_input = get_os_input(get_server_os_input);
+    // Gezellij: an in-place successor must keep the pid it inherited, so it never daemonizes
+    let foreground = foreground || adopt.is_some();
+    if let Some(manifest) = adopt {
+        let _ = zellij_server::ADOPT_MANIFEST.set(manifest);
+    }
     if foreground {
         start_server_foreground(Box::new(os_input), path);
     } else {
