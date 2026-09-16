@@ -163,6 +163,17 @@ zellij attach --create-background nightly-sync --restart always -- ./sync.sh
 `--restart` here applies to the initial command and requires one, and takes the same three values
 (CLI parsing is strict: `no`, `on-failure`, `always`).
 
+### A supervised pane in the session you are already in
+
+```bash
+zellij run --restart on-failure -- ./flaky-thing
+zellij run --restart always --floating -- tail -F /var/log/whatever
+```
+
+Same policy, same backoff, same kept history — just a pane in the current session instead of a
+session of its own. Nothing is registered and nothing survives the session; for that, use a
+service.
+
 ---
 
 ## systemd integration
@@ -318,6 +329,13 @@ put the same route in their `lo` `.network` file instead.
 
 Whether the prefix is routed is checked by *actually binding* a UDP socket on `<prefix>::1` — the
 same thing your service will attempt — rather than by parsing routing tables.
+
+
+> **Caveat on the "Routed: yes" check.** `net-setup` probes routability by binding a UDP socket on
+> the prefix, which is exactly what a service will do. On some kernels/configurations a plain user
+> can bind *any* `fd00::/8` address whether or not the local route exists, so the check can report
+> `yes` optimistically. If a service cannot actually be reached on its address, add the route as
+> shown above; it is harmless to add it twice.
 
 ### `--bind-ip`
 
