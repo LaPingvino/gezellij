@@ -163,53 +163,47 @@ zellij attach --create-background nightly-sync --restart always -- ./sync.sh
 
 ## systemd integration
 
-Services start on demand. To have one come up at login, export it as a `systemd --user` unit:
+To have a service come up at login, export it as a `systemd --user` unit:
 
 ```bash
-zellij service export-systemd api             # print the unit to stdout
-zellij service export-systemd api --install   # write ~/.config/systemd/user/gezellij-api.service
+zellij service export-systemd api            # print the unit
+zellij service export-systemd api --install  # write ~/.config/systemd/user/gezellij-api.service
 systemctl --user daemon-reload
 systemctl --user enable --now gezellij-api
 ```
 
-The generated unit is deliberately simple:
+The generated unit looks like this:
 
 ```ini
 [Unit]
 Description=Gezellij service: api
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
+Restart=on-failure
+RestartSec=2
 WorkingDirectory=/srv/api
-ExecStart=/usr/bin/zellij service start api
+ExecStart=/usr/bin/zellij service run api
 ExecStop=/usr/bin/zellij service stop api
 
 [Install]
 WantedBy=default.target
 ```
 
-**Be aware of the honest limitation.** The Zellij server double-forks away from whatever started
-it, so systemd has no process to track. That is why the unit is `Type=oneshot` with
-`RemainAfterExit=yes`: systemd records "the start command succeeded, consider this active" and
-leaves it at that. Consequences:
+`zellij service run <name>` is the foreground twin of `start`: it launches the session's server as
+a *child* of itself (with the hidden `--server-foreground` flag, so the server does not daemonize),
+performs the same first-client handshake `attach --create-background` does, and then simply waits
+for the server to exit. That gives systemd a real main process to track, so `Restart=on-failure`
+kicks in if the session dies unexpectedly, and `systemctl stop` first asks the session to shut down
+cleanly via `ExecStop`. If `ZELLIJ_SOCKET_DIR` or `--config-dir` were in effect when you exported,
+they are pinned with `Environment=` lines so the unit sees the same sessions your shell does.
 
-* systemd starts and stops the service correctly (`ExecStop` calls `zellij service stop`).
-* systemd does **not** notice if the session dies on its own — `systemctl --user status` will still
-  say active. Use `zellij service list` for the truth. Restarts *within* the session are Gezellij's
-  job anyway, via the restart policy.
-* systemd's own `Restart=` directives will not help here; don't reach for them.
+Two things worth knowing:
 
-If the service must keep running while you are logged out, enable lingering once:
-
-```bash
-loginctl enable-linger $USER
-```
-
-Paths and environment are quoted properly in the unit, so spaces in your binary path or working
-directory are fine.
-
----
+- Services that must keep running while you are logged out need lingering enabled once:
+  `loginctl enable-linger $USER`.
+- `run` refuses to take over a service that is already running (started by hand with `start`);
+  stop it first if systemd should own it.
 
 ## How it works
 

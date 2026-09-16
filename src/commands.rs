@@ -31,7 +31,10 @@ use zellij_utils::web_authentication_tokens::{
 };
 
 use miette::{Report, Result};
-use zellij_server::{os_input_output::get_server_os_input, start_server as start_server_impl};
+use zellij_server::{
+    os_input_output::get_server_os_input, start_server as start_server_impl,
+    start_server_foreground,
+};
 use zellij_utils::{
     cli::{CliArgs, Command, SessionCommand, Sessions},
     data::ConnectToSession,
@@ -165,11 +168,57 @@ fn get_os_input<OsInputOutput>(
     }
 }
 
-pub(crate) fn start_server(path: PathBuf, debug: bool) {
+pub(crate) fn start_server(path: PathBuf, debug: bool, foreground: bool) {
     // Set instance-wide debug mode
     zellij_utils::consts::DEBUG_MODE.set(debug).unwrap();
     let os_input = get_os_input(get_server_os_input);
-    start_server_impl(Box::new(os_input), path);
+    if foreground {
+        start_server_foreground(Box::new(os_input), path);
+    } else {
+        start_server_impl(Box::new(os_input), path);
+    }
+}
+
+/// Gezellij: create a new detached session on a server that is *already running* and waiting for
+/// its first client (started with `--server <socket> --server-foreground`). Mirrors the
+/// `attach --create-background` path minus spawning the server.
+pub(crate) fn create_session_on_running_server(
+    opts: CliArgs,
+    session_name: String,
+    initial_command: Vec<String>,
+    restart: zellij_utils::input::command::RestartPolicy,
+) {
+    let (config, client_layout_info, config_options, _, _) = match Setup::from_cli_args(&opts) {
+        Ok(results) => results,
+        Err(e) => {
+            if let ConfigError::KdlError(error) = e {
+                let report: Report = error.into();
+                eprintln!("{:?}", report);
+            } else {
+                eprintln!("{}", e);
+            }
+            process::exit(1);
+        },
+    };
+    let os_input = get_os_input(get_client_os_input);
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let initial_panes = initial_panes_from_cli(
+        initial_command,
+        None,
+        Some(current_dir.clone()),
+        current_dir,
+        false,
+        false,
+        restart,
+    );
+    let info = ClientInfo::New(session_name, client_layout_info, None, initial_panes);
+    zellij_client::create_session_on_running_server(
+        Box::new(os_input),
+        opts,
+        config,
+        config_options,
+        info,
+    );
 }
 
 #[cfg(feature = "web_server_capability")]

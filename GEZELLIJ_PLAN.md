@@ -101,7 +101,8 @@
 - [x] Implement headless pane execution (spawning without requiring an active GUI/TUI client attached). *(verified: `attach --create-background` runs without a controlling terminal; CLI actions on such a session must address panes explicitly since nothing is focused)*
 - [x] Implement basic process supervision / auto-restart logic (`restart = "always" | "on-failure" | "no"`). *(`RunCommand.restart` + `pty.rs::command_exit_callback`, exponential backoff, KDL `restart` property, `attach --restart`)*
 - [x] Implement `systemd --user` unit generation helper (`gezellij service export-systemd <name>`). *(`zellij-utils/src/host_fabric/systemd.rs`; `Type=oneshot` for now, see §5.3)*
-- [ ] Follow-ups: server `--foreground` mode for real systemd supervision; keep previous run's output visible in `service logs`; show services in the session-manager plugin.
+- [x] Server foreground mode (`--server-foreground`, `zellij service run <name>`): systemd units are now `Type=simple` + `Restart=on-failure` with a real main process.
+- [ ] Follow-ups: keep previous run's output visible in `service logs`; show services in the session-manager plugin; Arch PKGBUILD + login takeover script (in progress).
 
 ### Phase 2: Cgroups v2 Process Freezing
 - [ ] Add cgroups v2 detection and freezer controller interface in `zellij-utils`.

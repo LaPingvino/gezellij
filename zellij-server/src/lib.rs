@@ -860,6 +860,13 @@ mod session_state_tests {
     }
 }
 
+/// Gezellij: start the server without daemonizing, so the calling process (and any supervisor
+/// tracking it, e.g. `systemd --user`) keeps a handle on it.
+pub fn start_server_foreground(os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
+    info!("Starting Zellij server in the foreground!");
+    start_server_impl(os_input, socket_path, true);
+}
+
 pub fn start_server(os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     info!("Starting Zellij server!");
 

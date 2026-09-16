@@ -73,6 +73,12 @@ pub struct CliArgs {
     #[clap(long, value_parser, hide = true, overrides_with = "server")]
     pub server: Option<PathBuf>,
 
+    /// Gezellij: keep the server in the foreground instead of daemonizing (used by
+    /// `zellij service run` so a supervisor such as systemd can track it)
+    #[clap(long, hide = true, requires = "server")]
+    #[serde(default)]
+    pub server_foreground: bool,
+
     /// Specify name of a new session
     #[clap(long, short, overrides_with = "session", value_parser = validate_session)]
     pub session: Option<String>,
@@ -191,6 +197,14 @@ pub enum ServiceCommand {
         /// The command to supervise
         #[clap(last(true), required(true))]
         command: Vec<String>,
+    },
+    /// Run a defined service in the foreground: the session's server runs as a child of this
+    /// process, so a supervisor (systemd --user) can track and restart it. Exits when the
+    /// service session ends.
+    Run {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
     },
     /// Start a defined service in the background (idempotent)
     Start {

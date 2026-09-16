@@ -1636,11 +1636,34 @@ pub fn start_client(
 }
 
 pub fn start_server_detached(
+    os_input: Box<dyn ClientOsApi>,
+    cli_args: CliArgs,
+    config: Config,
+    config_options: Options,
+    info: ClientInfo,
+) {
+    start_server_detached_impl(os_input, cli_args, config, config_options, info, true)
+}
+
+/// Gezellij: like [`start_server_detached`], but for a server that was already started (e.g. in
+/// the foreground by `zellij service run`) and is waiting for its first client.
+pub fn create_session_on_running_server(
+    os_input: Box<dyn ClientOsApi>,
+    cli_args: CliArgs,
+    config: Config,
+    config_options: Options,
+    info: ClientInfo,
+) {
+    start_server_detached_impl(os_input, cli_args, config, config_options, info, false)
+}
+
+fn start_server_detached_impl(
     mut os_input: Box<dyn ClientOsApi>,
     cli_args: CliArgs,
     config: Config,
     config_options: Options,
     info: ClientInfo,
+    spawn_server: bool,
 ) {
     envs::set_zellij("0".to_string());
     config.env.set_vars();
@@ -1674,8 +1697,10 @@ pub fn start_server_detached(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe(None);
 
-            if let Err(e) = os_input.spawn_server(&*ipc_pipe, cli_args.debug) {
-                exit_after_startup_error(None, spawn_server_error_message(e));
+            if spawn_server {
+                if let Err(e) = os_input.spawn_server(&*ipc_pipe, cli_args.debug) {
+                    exit_after_startup_error(None, spawn_server_error_message(e));
+                }
             }
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {
@@ -1733,8 +1758,10 @@ pub fn start_server_detached(
             os_input.update_session_name(name);
             let ipc_pipe = create_ipc_pipe(None);
 
-            if let Err(e) = os_input.spawn_server(&*ipc_pipe, cli_args.debug) {
-                exit_after_startup_error(None, spawn_server_error_message(e));
+            if spawn_server {
+                if let Err(e) = os_input.spawn_server(&*ipc_pipe, cli_args.debug) {
+                    exit_after_startup_error(None, spawn_server_error_message(e));
+                }
             }
             if should_start_web_server {
                 if let Err(e) = spawn_web_server(&cli_args) {

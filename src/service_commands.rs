@@ -12,7 +12,7 @@ use std::process::{Command as ProcessCommand, Stdio};
 
 use zellij_utils::{
     cli::{CliArgs, Command, ServiceCommand, Sessions, SubscribeCli, SubscribeFormat},
-    consts::session_info_folder_for_session,
+    consts::{session_info_folder_for_session, ZELLIJ_SOCK_DIR},
     home::find_default_config_dir,
     host_fabric::{services::validate_service_name, systemd, ServiceDefinition, ServiceRegistry},
     input::config::Config,
@@ -126,6 +126,95 @@ fn start_service(opts: &CliArgs, service: &ServiceDefinition) {
         "Started service '{}' in background session {} (restart: {})",
         service.name, session, service.restart
     );
+}
+
+/// Host the service session's server as a foreground child of this process (for systemd).
+///
+/// 1. spawn `zellij --server <socket> --server-foreground` as a child (no daemonizing),
+/// 2. wait for its socket, then perform the same first-client handshake `attach
+///    --create-background` does, which creates the session with the supervised command,
+/// 3. block until the server exits and exit with its status.
+fn run_service_in_foreground(opts: &CliArgs, service: &ServiceDefinition) -> ! {
+    let session = service.session_name();
+    if is_running(&session) {
+        fail(format!(
+            "Service '{}' is already running (session {}); stop it first if a supervisor should own it",
+            service.name, session
+        ));
+    }
+    clear_resurrection_cache(&session);
+    if let Some(cwd) = service.cwd.as_ref() {
+        if let Err(e) = std::env::set_current_dir(cwd) {
+            fail(format!(
+                "Could not enter the working directory {} of service '{}': {}",
+                cwd.display(),
+                service.name,
+                e
+            ));
+        }
+    }
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(e) => fail(format!("Could not determine the zellij executable: {}", e)),
+    };
+    let socket_path = ZELLIJ_SOCK_DIR.join(&session);
+    if let Err(e) = fs::create_dir_all(&*ZELLIJ_SOCK_DIR) {
+        fail(format!(
+            "Could not create the socket directory {}: {}",
+            ZELLIJ_SOCK_DIR.display(),
+            e
+        ));
+    }
+    let mut command = ProcessCommand::new(executable);
+    command
+        .arg("--server")
+        .arg(&socket_path)
+        .arg("--server-foreground");
+    if opts.debug {
+        command.arg("--debug");
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => fail(format!("Could not start the session server: {}", e)),
+    };
+    // wait for the server to be listening before we connect as its first client
+    let started = std::time::Instant::now();
+    loop {
+        if socket_path.exists() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            fail(format!(
+                "The session server exited before it was ready (status {})",
+                status
+            ));
+        }
+        if started.elapsed() > std::time::Duration::from_secs(15) {
+            let _ = child.kill();
+            fail("Timed out waiting for the session server to start");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    crate::commands::create_session_on_running_server(
+        opts.clone(),
+        session.clone(),
+        service.command.clone(),
+        service.restart,
+    );
+    eprintln!(
+        "Running service '{}' in the foreground (session {}, restart: {}); the session server is pid {}",
+        service.name,
+        session,
+        service.restart,
+        child.id()
+    );
+    match child.wait() {
+        Ok(status) => {
+            clear_resurrection_cache(&session);
+            std::process::exit(status.code().unwrap_or(1));
+        },
+        Err(e) => fail(format!("Lost track of the session server: {}", e)),
+    }
 }
 
 fn stop_service(service: &ServiceDefinition) {
@@ -404,6 +493,10 @@ pub(crate) fn run_service_command(opts: CliArgs, command: ServiceCommand) {
         ServiceCommand::Start { name } => {
             let service = load_or_fail(&registry, &name);
             start_service(&opts, &service);
+        },
+        ServiceCommand::Run { name } => {
+            let service = load_or_fail(&registry, &name);
+            run_service_in_foreground(&opts, &service);
         },
         ServiceCommand::Stop { name } => {
             let service = load_or_fail(&registry, &name);
