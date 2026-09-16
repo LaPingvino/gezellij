@@ -218,9 +218,28 @@ pub enum ServiceCommand {
         #[clap(short, long)]
         force: bool,
 
+        /// Give the service its own loopback IPv6 address (so every service can use the same
+        /// well-known port), exported to the command as GEZELLIJ_BIND_ADDR / GEZELLIJ_BIND_PORT /
+        /// GEZELLIJ_BIND_URL
+        #[clap(long)]
+        bind_ip: bool,
+
         /// The command to supervise
         #[clap(last(true), required(true))]
         command: Vec<String>,
+    },
+    /// Show this installation's loopback IPv6 (ULA) prefix, whether it is routed locally, and the
+    /// one-time root command that makes it so
+    NetSetup,
+    /// Print reverse-proxy / hosts configuration for services with their own address
+    NetExport {
+        /// Service name (default: every service with --bind-ip)
+        #[clap(value_parser)]
+        name: Option<String>,
+
+        /// Output format
+        #[clap(long, value_enum, default_value_t = crate::host_fabric::net::NetExportFormat::Caddy)]
+        format: crate::host_fabric::net::NetExportFormat,
     },
     /// Run a defined service in the foreground: the session's server runs as a child of this
     /// process, so a supervisor (systemd --user) can track and restart it. Exits when the

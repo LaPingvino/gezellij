@@ -14,7 +14,9 @@ use zellij_utils::{
     cli::{CliArgs, Command, ServiceCommand, Sessions, SubscribeCli, SubscribeFormat},
     consts::{session_info_folder_for_session, ZELLIJ_SOCK_DIR},
     home::find_default_config_dir,
-    host_fabric::{services::validate_service_name, systemd, ServiceDefinition, ServiceRegistry},
+    host_fabric::{
+        net, services::validate_service_name, systemd, ServiceDefinition, ServiceRegistry,
+    },
     input::config::Config,
     sessions::{kill_session, session_exists},
 };
@@ -45,15 +47,56 @@ fn clear_resurrection_cache(session: &str) {
     }
 }
 
-fn registry_from_opts(opts: &CliArgs) -> ServiceRegistry {
-    let config_dir = opts
-        .config_dir
+fn config_dir_from_opts(opts: &CliArgs) -> PathBuf {
+    opts.config_dir
         .clone()
         .or_else(find_default_config_dir)
         .unwrap_or_else(|| {
             fail("Could not determine the Zellij config directory; pass --config-dir explicitly")
-        });
-    ServiceRegistry::in_config_dir(&config_dir)
+        })
+}
+
+fn registry_from_opts(opts: &CliArgs) -> ServiceRegistry {
+    ServiceRegistry::in_config_dir(&config_dir_from_opts(opts))
+}
+
+/// Export a service's own loopback address into *this* process' environment.
+///
+/// The pane that runs the service inherits its environment from the session server, and the
+/// session server is spawned as a child of this very process (`spawn_server` in the background
+/// case, the explicit `--server --server-foreground` child in `service run`); neither clears the
+/// environment, and pane spawning only *adds* variables. So plain `set_var` here is enough, and
+/// unlike prepending `env FOO=bar ...` to the command it leaves the stored definition, the
+/// displayed command and the restart/resurrect machinery untouched.
+///
+/// Returns the address, if the service asked for one.
+fn export_bind_env(opts: &CliArgs, service: &ServiceDefinition) -> Option<std::net::SocketAddrV6> {
+    if !service.bind_ip {
+        return None;
+    }
+    let config_dir = config_dir_from_opts(opts);
+    let prefix = match net::load_or_create_prefix(&config_dir) {
+        Ok(prefix) => prefix,
+        Err(e) => fail(format!(
+            "Could not read or create the loopback IPv6 prefix in {}: {}",
+            config_dir.display(),
+            e
+        )),
+    };
+    let address = net::bind_address_for(&prefix, service)?;
+    std::env::set_var("GEZELLIJ_BIND_ADDR", address.ip().to_string());
+    std::env::set_var("GEZELLIJ_BIND_PORT", address.port().to_string());
+    std::env::set_var("GEZELLIJ_BIND_URL", net::bind_url(&address));
+    if !net::is_prefix_routed_locally(&prefix) {
+        eprintln!(
+            "Warning: {} is not routed on this machine yet, so service '{}' cannot bind {}.",
+            prefix,
+            service.name,
+            address.ip()
+        );
+        eprintln!("{}", net::setup_instructions(&prefix));
+    }
+    Some(address)
 }
 
 fn load_or_fail(registry: &ServiceRegistry, name: &str) -> ServiceDefinition {
@@ -121,11 +164,15 @@ fn start_service(opts: &CliArgs, service: &ServiceDefinition) {
             ));
         }
     }
+    let bind_address = export_bind_env(opts, service);
     crate::commands::start_client(attach_opts(opts, session.clone(), Some(service)));
     println!(
         "Started service '{}' in background session {} (restart: {})",
         service.name, session, service.restart
     );
+    if let Some(address) = bind_address {
+        println!("  listening on {}", net::bind_url(&address));
+    }
 }
 
 /// Host the service session's server as a foreground child of this process (for systemd).
@@ -153,6 +200,8 @@ fn run_service_in_foreground(opts: &CliArgs, service: &ServiceDefinition) -> ! {
             ));
         }
     }
+    // before the server child is spawned: it (and thus the service pane) inherits this environment
+    let bind_address = export_bind_env(opts, service);
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
         Err(e) => fail(format!("Could not determine the zellij executable: {}", e)),
@@ -208,6 +257,9 @@ fn run_service_in_foreground(opts: &CliArgs, service: &ServiceDefinition) -> ! {
         service.restart,
         child.id()
     );
+    if let Some(address) = bind_address {
+        eprintln!("  listening on {}", net::bind_url(&address));
+    }
     match child.wait() {
         Ok(status) => {
             clear_resurrection_cache(&session);
@@ -333,7 +385,15 @@ fn print_logs(
     }
 }
 
-fn list_services(registry: &ServiceRegistry, no_formatting: bool) {
+fn list_services(opts: &CliArgs, registry: &ServiceRegistry, no_formatting: bool) {
+    // read-only: listing must never mint a prefix as a side effect
+    let prefix = match net::load_prefix(&config_dir_from_opts(opts)) {
+        Ok(prefix) => prefix,
+        Err(e) => {
+            eprintln!("Warning: could not read the loopback IPv6 prefix: {}", e);
+            None
+        },
+    };
     let services = match registry.list() {
         Ok(services) => services,
         Err(e) => fail(format!("Could not read the service registry: {}", e)),
@@ -349,6 +409,7 @@ fn list_services(registry: &ServiceRegistry, no_formatting: bool) {
         status: &'static str,
         running: bool,
         restart: String,
+        address: String,
         cwd: String,
         command: String,
     }
@@ -361,6 +422,11 @@ fn list_services(registry: &ServiceRegistry, no_formatting: bool) {
                 status: if running { "running" } else { "stopped" },
                 running,
                 restart: service.restart.to_string(),
+                address: prefix
+                    .as_ref()
+                    .and_then(|prefix| net::bind_address_for(prefix, service))
+                    .map(|address| format!("[{}]:{}", address.ip(), address.port()))
+                    .unwrap_or_else(|| "-".to_string()),
                 cwd: service
                     .cwd
                     .as_ref()
@@ -383,18 +449,21 @@ fn list_services(registry: &ServiceRegistry, no_formatting: bool) {
     let name_w = width("NAME", rows.iter().map(|r| r.name.as_str()).collect());
     let status_w = width("STATUS", rows.iter().map(|r| r.status).collect());
     let restart_w = width("RESTART", rows.iter().map(|r| r.restart.as_str()).collect());
+    let address_w = width("ADDRESS", rows.iter().map(|r| r.address.as_str()).collect());
     let cwd_w = width("CWD", rows.iter().map(|r| r.cwd.as_str()).collect());
 
     println!(
-        "{:<name_w$}  {:<status_w$}  {:<restart_w$}  {:<cwd_w$}  {}",
+        "{:<name_w$}  {:<status_w$}  {:<restart_w$}  {:<address_w$}  {:<cwd_w$}  {}",
         "NAME",
         "STATUS",
         "RESTART",
+        "ADDRESS",
         "CWD",
         "COMMAND",
         name_w = name_w,
         status_w = status_w,
         restart_w = restart_w,
+        address_w = address_w,
         cwd_w = cwd_w,
     );
     for row in &rows {
@@ -406,14 +475,16 @@ fn list_services(registry: &ServiceRegistry, no_formatting: bool) {
             format!("{}{}{}", colour, padded_status, RESET)
         };
         println!(
-            "{:<name_w$}  {}  {:<restart_w$}  {:<cwd_w$}  {}",
+            "{:<name_w$}  {}  {:<restart_w$}  {:<address_w$}  {:<cwd_w$}  {}",
             row.name,
             status,
             row.restart,
+            row.address,
             row.cwd,
             row.command,
             name_w = name_w,
             restart_w = restart_w,
+            address_w = address_w,
             cwd_w = cwd_w,
         );
     }
@@ -453,6 +524,84 @@ fn export_systemd(opts: &CliArgs, service: &ServiceDefinition, install: bool) {
     }
 }
 
+fn net_setup(opts: &CliArgs) {
+    let config_dir = config_dir_from_opts(opts);
+    let prefix = match net::load_or_create_prefix(&config_dir) {
+        Ok(prefix) => prefix,
+        Err(e) => fail(format!(
+            "Could not read or create the loopback IPv6 prefix in {}: {}",
+            config_dir.display(),
+            e
+        )),
+    };
+    println!("Prefix:  {}", prefix);
+    println!(
+        "Stored:  {}",
+        config_dir.join(net::NETWORK_FILE_NAME).display()
+    );
+    println!(
+        "Port:    {} (the same for every service)",
+        net::default_port()
+    );
+    if net::is_prefix_routed_locally(&prefix) {
+        println!("Routed:  yes - services can bind their own address right now");
+        println!();
+        println!(
+            "    sudo ip -6 route add local {} dev lo    # already done",
+            prefix
+        );
+    } else {
+        println!("Routed:  no - run the command below once, as root");
+        println!();
+        print!("{}", net::setup_instructions(&prefix));
+    }
+}
+
+fn net_export(
+    opts: &CliArgs,
+    registry: &ServiceRegistry,
+    name: Option<String>,
+    format: net::NetExportFormat,
+) {
+    let config_dir = config_dir_from_opts(opts);
+    let prefix = match net::load_prefix(&config_dir) {
+        Ok(Some(prefix)) => prefix,
+        Ok(None) => {
+            fail("No loopback IPv6 prefix has been generated yet; run: zellij service net-setup")
+        },
+        Err(e) => fail(format!("Could not read the loopback IPv6 prefix: {}", e)),
+    };
+    let services: Vec<ServiceDefinition> = match name {
+        Some(name) => vec![load_or_fail(registry, &name)],
+        None => match registry.list() {
+            Ok(services) => services,
+            Err(e) => fail(format!("Could not read the service registry: {}", e)),
+        },
+    };
+    let mut exported = 0;
+    for service in &services {
+        let Some(address) = net::bind_address_for(&prefix, service) else {
+            continue;
+        };
+        exported += 1;
+        let hostname = net::hostname_for(&service.name);
+        match format {
+            net::NetExportFormat::Caddy => {
+                print!(
+                    "{}",
+                    net::caddy_snippet(&hostname, address.ip(), address.port())
+                )
+            },
+            net::NetExportFormat::Hosts => print!("{}", net::hosts_line(address.ip(), &hostname)),
+        }
+    }
+    if exported == 0 {
+        eprintln!(
+            "No service has an address of its own; add one with: zellij service add --bind-ip ..."
+        );
+    }
+}
+
 pub(crate) fn run_service_command(opts: CliArgs, command: ServiceCommand) {
     let registry = registry_from_opts(&opts);
     match command {
@@ -462,6 +611,7 @@ pub(crate) fn run_service_command(opts: CliArgs, command: ServiceCommand) {
             cwd,
             no_start,
             force,
+            bind_ip,
             command,
         } => {
             if let Err(e) = validate_service_name(&name) {
@@ -481,10 +631,30 @@ pub(crate) fn run_service_command(opts: CliArgs, command: ServiceCommand) {
                 Some(cwd) => current_dir.join(cwd),
                 None => current_dir,
             };
-            let service = ServiceDefinition::new(name.clone(), command, Some(cwd), restart);
+            let mut service = ServiceDefinition::new(name.clone(), command, Some(cwd), restart);
+            service.bind_ip = bind_ip;
             match registry.save(&service) {
                 Ok(path) => println!("Saved service '{}' -> {}", name, path.display()),
                 Err(e) => fail(format!("Could not save service '{}': {}", name, e)),
+            }
+            if bind_ip {
+                let config_dir = config_dir_from_opts(&opts);
+                match net::load_or_create_prefix(&config_dir) {
+                    Ok(prefix) => {
+                        if let Some(address) = net::bind_address_for(&prefix, &service) {
+                            println!(
+                                "  own address: {} (GEZELLIJ_BIND_URL={})",
+                                address,
+                                net::bind_url(&address)
+                            );
+                        }
+                    },
+                    Err(e) => fail(format!(
+                        "Could not read or create the loopback IPv6 prefix in {}: {}",
+                        config_dir.display(),
+                        e
+                    )),
+                }
             }
             if !no_start {
                 start_service(&opts, &service);
@@ -511,7 +681,9 @@ pub(crate) fn run_service_command(opts: CliArgs, command: ServiceCommand) {
                 Err(e) => fail(format!("Could not remove service '{}': {}", name, e)),
             }
         },
-        ServiceCommand::List { no_formatting } => list_services(&registry, no_formatting),
+        ServiceCommand::List { no_formatting } => list_services(&opts, &registry, no_formatting),
+        ServiceCommand::NetSetup => net_setup(&opts),
+        ServiceCommand::NetExport { name, format } => net_export(&opts, &registry, name, format),
         ServiceCommand::Attach { name } => {
             let service = load_or_fail(&registry, &name);
             let session = service.session_name();

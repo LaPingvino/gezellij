@@ -250,3 +250,112 @@ Phase 1 of [GEZELLIJ_PLAN.md](GEZELLIJ_PLAN.md) is deliberately small. Today:
 * **No socket activation or ULA loopback binding yet** — Phase 4.
 
 Bug reports and rough edges are welcome. Cozy software gets cozier with use.
+
+---
+
+## Networking
+
+### Addresses instead of ports
+
+`127.0.0.1` has one flat port namespace, so every service that wants to be "the web thing" has to
+be talked out of `:8080` and into some arbitrary number nobody remembers. IPv6 makes that
+unnecessary: one `/64` out of the Unique Local Address range routed *locally* on `lo` gives you
+2^64 loopback addresses, and every service can bind **the same well-known port** on an address of
+its own:
+
+```
+api   -> http://[fdxx:xxxx:xxxx::9f2c:....]:8080
+blog  -> http://[fdxx:xxxx:xxxx::41d8:....]:8080
+```
+
+No port registry, no collisions, no `--port` flags to keep straight.
+
+### The prefix (generated per installation)
+
+RFC 4193 asks for a *pseudo-random* 40-bit global ID so two hosts that later get bridged do not
+collide. Gezellij therefore generates your prefix once, on first use, and stores it in
+`<config dir>/network.json`:
+
+```json
+{ "prefix": "fdxx:xxxx:xxxx::/64" }
+```
+
+It is never hardcoded and never rotated behind your back (a corrupt `network.json` is an error,
+not a reason to mint a new prefix — rotating it would invalidate the route you installed as root).
+
+Each service's address is the prefix plus a 64-bit interface id derived (SHA-256) from the
+service's opaque `id`, not from its name: renaming a service does not move it. Definitions written
+before this feature have no `id` and fall back to a stable hash of `name:<name>`.
+
+### One-time root setup
+
+```console
+$ zellij service net-setup
+Prefix:  fdxx:xxxx:xxxx::/64
+Stored:  ~/.config/zellij/network.json
+Port:    8080 (the same for every service)
+Routed:  no - run the command below once, as root
+
+    sudo ip -6 route add local fdxx:xxxx:xxxx::/64 dev lo
+```
+
+A `local` route makes the kernel treat *every* address in the /64 as one of its own, so services
+can `bind()` them without an `ip addr add` per service. Check it with:
+
+```console
+$ ip -6 route show table local | grep fdxx:
+```
+
+`net-setup` prints a ready-made `/etc/systemd/system/gezellij-ula.service` oneshot unit
+(`ExecStart=/usr/bin/ip -6 route add local <prefix> dev lo`, `RemainAfterExit=yes`) to make the
+route survive a reboot; it works no matter which daemon manages `lo`. systemd-networkd users can
+put the same route in their `lo` `.network` file instead.
+
+Whether the prefix is routed is checked by *actually binding* a UDP socket on `<prefix>::1` — the
+same thing your service will attempt — rather than by parsing routing tables.
+
+### `--bind-ip`
+
+```console
+$ zellij service add --name api --bind-ip -- ./serve
+Saved service 'api' -> ~/.config/zellij/services/api.json
+  own address: [fdxx:xxxx:xxxx::9f2c:....]:8080 (GEZELLIJ_BIND_URL=http://[fdxx:...]:8080)
+Started service 'api' in background session svc-api (restart: on-failure)
+  listening on http://[fdxx:xxxx:xxxx::9f2c:....]:8080
+```
+
+The service's command gets three environment variables:
+
+| Variable | Example |
+|---|---|
+| `GEZELLIJ_BIND_ADDR` | `fdxx:xxxx:xxxx::9f2c:....` |
+| `GEZELLIJ_BIND_PORT` | `8080` |
+| `GEZELLIJ_BIND_URL`  | `http://[fdxx:xxxx:xxxx::9f2c:....]:8080` |
+
+Use them as your listen address (`app.listen(process.env.GEZELLIJ_BIND_ADDR, ...)`,
+`--bind "[$GEZELLIJ_BIND_ADDR]:$GEZELLIJ_BIND_PORT"`, …). They are exported into the environment
+of the process that starts the service; the session server is spawned as its child and the service
+pane inherits from the server, so the variables arrive without touching the stored command. A
+consequence: changing `--bind-ip` on an existing service (`add --force`) takes effect on the next
+`stop` + `start`, not on the running pane.
+
+If the prefix is not routed yet, the service still starts — you just get a warning with the setup
+command, because the failure otherwise shows up as an opaque `EADDRNOTAVAIL` inside the service.
+
+`zellij service list` shows the address in an `ADDRESS` column (`-` for services without one).
+
+### Exporting to a reverse proxy
+
+```console
+$ zellij service net-export --format caddy
+api.localhost {
+	reverse_proxy [fdxx:xxxx:xxxx::9f2c:....]:8080
+}
+
+$ zellij service net-export api --format hosts
+fdxx:xxxx:xxxx::9f2c:....	api.localhost
+```
+
+With no name, every `--bind-ip` service is exported. Pipe the Caddy output into a file that your
+`Caddyfile` `import`s and each service keeps a stable name *and* a stable address, while the
+service itself only ever knows about port 8080.

@@ -22,6 +22,11 @@ pub const SERVICES_DIR_NAME: &str = "services";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceDefinition {
     pub name: String,
+    /// Opaque, stable identity of this service (uuid-v4 hex). It is what the service's loopback
+    /// IPv6 address is derived from, so that renaming a service does not move it. Definitions
+    /// written before Phase 4 have no id; see [`ServiceDefinition::address_id`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     /// argv: program followed by its arguments
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,6 +36,11 @@ pub struct ServiceDefinition {
     /// unix timestamp (seconds) of when the definition was created
     #[serde(default)]
     pub created_at: u64,
+    /// Give the service a loopback IPv6 address of its own (see [`crate::host_fabric::net`]) and
+    /// export it to the command as `GEZELLIJ_BIND_ADDR` / `GEZELLIJ_BIND_PORT` /
+    /// `GEZELLIJ_BIND_URL`.
+    #[serde(default)]
+    pub bind_ip: bool,
 }
 
 impl ServiceDefinition {
@@ -42,6 +52,7 @@ impl ServiceDefinition {
     ) -> Self {
         ServiceDefinition {
             name: name.into(),
+            id: uuid::Uuid::new_v4().simple().to_string(),
             command,
             cwd,
             restart,
@@ -49,6 +60,19 @@ impl ServiceDefinition {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            bind_ip: false,
+        }
+    }
+    /// The string a service's loopback address is derived from.
+    ///
+    /// Normally the opaque [`ServiceDefinition::id`]. Definitions written before Phase 4 do not
+    /// have one, so they fall back to a namespaced form of their name: stable (the address never
+    /// moves under a running service) without having to rewrite old files.
+    pub fn address_id(&self) -> String {
+        if self.id.is_empty() {
+            format!("name:{}", self.name)
+        } else {
+            self.id.clone()
         }
     }
     /// The Zellij session this service runs in.

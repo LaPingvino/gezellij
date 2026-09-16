@@ -15,6 +15,7 @@
 pub mod cgroups;
 #[cfg(unix)]
 pub mod handover;
+pub mod net;
 pub mod services;
 pub mod systemd;
 #[cfg(unix)]
