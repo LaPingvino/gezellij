@@ -186,6 +186,36 @@ rc_for_shell() {
     esac
 }
 
+# Bash is the awkward one: a LOGIN shell (ssh, a VT console, some display
+# managers) reads ~/.bash_profile or ~/.profile and does NOT read ~/.bashrc
+# unless that file sources it. byobu's launcher lives in ~/.profile precisely
+# for that reason, so if we disable it there and only put our block in
+# ~/.bashrc, logging in over ssh would get neither. When the login file does
+# source ~/.bashrc, one copy is enough and we return nothing.
+#
+# zsh reads ~/.zshrc for interactive login shells too, and fish reads
+# config.fish always, so neither needs a second copy.
+login_rc_for_shell() {
+    local login_rc
+    case "$1" in
+        bash)
+            if [ -f "$HOME/.bash_profile" ]; then
+                login_rc="$HOME/.bash_profile"
+            elif [ -f "$HOME/.profile" ]; then
+                login_rc="$HOME/.profile"
+            else
+                return 0
+            fi
+            # already chains to .bashrc? then the block there is reached anyway
+            if grep -q '[.]bashrc' "$login_rc" 2>/dev/null; then
+                return 0
+            fi
+            printf '%s' "$login_rc"
+            ;;
+        *) return 0 ;;
+    esac
+}
+
 # Files scanned for existing byobu/tmux/screen auto-start lines.
 scan_candidates() {
     printf '%s\n' \
@@ -575,7 +605,7 @@ has_block() {
 
 install_block() {
     local sh="$1" bin="$2" rc tmp
-    rc="$(rc_for_shell "$sh")"
+    rc="${3:-$(rc_for_shell "$sh")}"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         if has_block "$rc"; then
@@ -671,7 +701,7 @@ restore_disabled_lines() {
 # commands
 # ---------------------------------------------------------------------------
 cmd_install() {
-    local bin shells sh f
+    local bin shells sh f login_rc
     bin="$(find_binary)"
     shells="$(target_shells)"
     info "$PROG: install"
@@ -697,6 +727,11 @@ cmd_install() {
 
     for sh in $shells; do
         install_block "$sh" "$bin"
+        login_rc="$(login_rc_for_shell "$sh")"
+        if [ -n "$login_rc" ]; then
+            info "  (also covering login shells, which never read $(rc_for_shell "$sh"))"
+            install_block "$sh" "$bin" "$login_rc"
+        fi
     done
 
     info ""
