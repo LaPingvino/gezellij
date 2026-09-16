@@ -2649,6 +2649,8 @@ pub enum ExitReason {
     Error = 7,
     CustomExitStatus = 8,
     KickedByHost = 9,
+    /// Gezellij: the session survived an in-place upgrade
+    ServerUpgraded = 10,
 }
 impl ExitReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2667,6 +2669,7 @@ impl ExitReason {
             ExitReason::Error => "EXIT_REASON_ERROR",
             ExitReason::CustomExitStatus => "EXIT_REASON_CUSTOM_EXIT_STATUS",
             ExitReason::KickedByHost => "EXIT_REASON_KICKED_BY_HOST",
+            ExitReason::ServerUpgraded => "EXIT_REASON_SERVER_UPGRADED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -2682,6 +2685,7 @@ impl ExitReason {
             "EXIT_REASON_ERROR" => Some(Self::Error),
             "EXIT_REASON_CUSTOM_EXIT_STATUS" => Some(Self::CustomExitStatus),
             "EXIT_REASON_KICKED_BY_HOST" => Some(Self::KickedByHost),
+            "EXIT_REASON_SERVER_UPGRADED" => Some(Self::ServerUpgraded),
             _ => None,
         }
     }

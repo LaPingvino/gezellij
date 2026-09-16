@@ -200,6 +200,27 @@ impl PaneCgroups {
             .map(|(id, dir)| (id, set_frozen(&dir, frozen)))
             .collect())
     }
+    /// How many of the session's panes are currently frozen.
+    ///
+    /// Panes whose `cgroup.events` cannot be read (the pane exited between the listing and the
+    /// read, or the file is not readable for us) are skipped entirely rather than failing the
+    /// whole summary: this feeds a status column, where "one pane less" is far better than no
+    /// answer at all.
+    pub fn freeze_summary(&self) -> io::Result<FreezeSummary> {
+        let mut summary = FreezeSummary::default();
+        for (_, dir) in self.list_panes()? {
+            match freeze_state(&dir) {
+                Ok(state) => {
+                    summary.total += 1;
+                    if state.frozen {
+                        summary.frozen += 1;
+                    }
+                },
+                Err(_) => continue,
+            }
+        }
+        Ok(summary)
+    }
     /// Best-effort teardown at server exit: thaw and remove every pane cgroup, then the root and
     /// the CLI record. Also sweeps empty leftovers of earlier sessions next to this root.
     pub fn remove_all(&self, session_name: &str) {
@@ -212,6 +233,45 @@ impl PaneCgroups {
         let _ = fs::remove_dir(&self.root);
         let _ = fs::remove_file(record_file(session_name));
         sweep_stale_roots(self.root.parent());
+    }
+}
+
+/// How many panes of a session there are, and how many of them are frozen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FreezeSummary {
+    pub total: usize,
+    pub frozen: usize,
+}
+
+impl FreezeSummary {
+    /// Every pane (and there is at least one) is frozen.
+    pub fn all_frozen(&self) -> bool {
+        self.total > 0 && self.frozen == self.total
+    }
+    /// Some panes are frozen and some are not.
+    pub fn partly_frozen(&self) -> bool {
+        self.frozen > 0 && self.frozen < self.total
+    }
+}
+
+/// Freeze or thaw every pane of a session by name, returning `(ok, failed)` pane counts.
+///
+/// `Ok(None)` means the session never recorded a cgroup root - its server ran without cgroup v2
+/// delegation (or is an older build), so there is nothing to freeze.
+pub fn set_session_frozen(session_name: &str, frozen: bool) -> io::Result<Option<(usize, usize)>> {
+    let Some(tree) = PaneCgroups::from_session_record(session_name)? else {
+        return Ok(None);
+    };
+    let results = tree.set_all_frozen(frozen)?;
+    let failed = results.iter().filter(|(_, r)| r.is_err()).count();
+    Ok(Some((results.len() - failed, failed)))
+}
+
+/// The freezer summary of a session by name; `Ok(None)` when it has no recorded cgroup root.
+pub fn session_freeze_summary(session_name: &str) -> io::Result<Option<FreezeSummary>> {
+    match PaneCgroups::from_session_record(session_name)? {
+        Some(tree) => Ok(Some(tree.freeze_summary()?)),
+        None => Ok(None),
     }
 }
 
@@ -291,6 +351,88 @@ mod tests {
             .collect();
         assert_eq!(ids, vec![2, 7, 10]);
         assert!(tree.pane_dir(2).ends_with("pane-2"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn fake_tree(tag: &str, panes: &[(u32, bool)]) -> (PathBuf, PaneCgroups) {
+        let root = std::env::temp_dir().join(format!("gz-cg-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let tree = PaneCgroups::at(root.clone());
+        for (id, frozen) in panes {
+            let dir = tree.pane_dir(*id);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("cgroup.events"),
+                format!("populated 1\nfrozen {}\n", if *frozen { 1 } else { 0 }),
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(&root).unwrap();
+        (root, tree)
+    }
+
+    #[test]
+    fn freeze_summary_counts_frozen_panes() {
+        let (root, tree) = fake_tree("sum-all", &[(1, true), (2, true)]);
+        let summary = tree.freeze_summary().unwrap();
+        assert_eq!(
+            summary,
+            FreezeSummary {
+                total: 2,
+                frozen: 2
+            }
+        );
+        assert!(summary.all_frozen());
+        assert!(!summary.partly_frozen());
+        let _ = fs::remove_dir_all(&root);
+
+        let (root, tree) = fake_tree("sum-some", &[(1, true), (2, false), (3, false)]);
+        let summary = tree.freeze_summary().unwrap();
+        assert_eq!(
+            summary,
+            FreezeSummary {
+                total: 3,
+                frozen: 1
+            }
+        );
+        assert!(!summary.all_frozen());
+        assert!(summary.partly_frozen());
+        let _ = fs::remove_dir_all(&root);
+
+        let (root, tree) = fake_tree("sum-none", &[(1, false)]);
+        let summary = tree.freeze_summary().unwrap();
+        assert_eq!(
+            summary,
+            FreezeSummary {
+                total: 1,
+                frozen: 0
+            }
+        );
+        assert!(!summary.all_frozen());
+        assert!(!summary.partly_frozen());
+        let _ = fs::remove_dir_all(&root);
+
+        // no panes at all: neither frozen nor partly frozen
+        let (root, tree) = fake_tree("sum-empty", &[]);
+        let summary = tree.freeze_summary().unwrap();
+        assert_eq!(summary, FreezeSummary::default());
+        assert!(!summary.all_frozen());
+        assert!(!summary.partly_frozen());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn freeze_summary_skips_panes_without_readable_events() {
+        let (root, tree) = fake_tree("sum-unreadable", &[(1, true)]);
+        // a pane directory with no cgroup.events at all (e.g. it vanished mid-listing)
+        fs::create_dir_all(tree.pane_dir(2)).unwrap();
+        assert_eq!(
+            tree.freeze_summary().unwrap(),
+            FreezeSummary {
+                total: 1,
+                frozen: 1
+            }
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

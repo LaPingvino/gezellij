@@ -3437,6 +3437,7 @@ impl From<ExitReason> for ProtoExitReason {
             ExitReason::Disconnect => ProtoExitReason::Disconnect,
             ExitReason::WebClientsForbidden => ProtoExitReason::WebClientsForbidden,
             ExitReason::KickedByHost => ProtoExitReason::KickedByHost,
+            ExitReason::ServerUpgraded => ProtoExitReason::ServerUpgraded,
             ExitReason::Error(_msg) => ProtoExitReason::Error,
             ExitReason::CustomExitStatus(_status) => ProtoExitReason::CustomExitStatus,
         }
@@ -3449,6 +3450,7 @@ impl TryFrom<ProtoExitReason> for ExitReason {
         match reason {
             ProtoExitReason::Normal => Ok(ExitReason::Normal),
             ProtoExitReason::NormalDetached => Ok(ExitReason::NormalDetached),
+            ProtoExitReason::ServerUpgraded => Ok(ExitReason::ServerUpgraded),
             ProtoExitReason::ForceDetached => Ok(ExitReason::ForceDetached),
             ProtoExitReason::CannotAttach => Ok(ExitReason::CannotAttach),
             ProtoExitReason::Disconnect => Ok(ExitReason::Disconnect),

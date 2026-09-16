@@ -1553,14 +1553,43 @@ pub fn start_server_impl(
                 );
                 remove_client!(client_id, os_input, session_state, session_data);
             },
-            ServerInstruction::PrepareUpgrade => match session_data.read().unwrap().as_ref() {
-                Some(session_data) => {
-                    log::info!("in-place upgrade requested; snapshotting session");
-                    let _ = session_data
-                        .senders
-                        .send_to_screen(ScreenInstruction::PrepareUpgrade);
-                },
-                None => log::warn!("upgrade requested before the session was initialised"),
+            ServerInstruction::PrepareUpgrade => {
+                // Gezellij: say goodbye properly before we replace ourselves. The clients are
+                // talking to *this* binary over a socket the new one is about to re-bind, so we
+                // detach them with a reason that says what happened and how to come back. The
+                // session itself keeps running throughout.
+                let client_ids = session_state.read().unwrap().client_ids();
+                for client_id in &client_ids {
+                    if let Some(session_data) = session_data.write().unwrap().as_mut() {
+                        session_data.remove_key_passthrough_client(*client_id);
+                    }
+                    let _ = os_input.send_to_client(
+                        *client_id,
+                        ServerToClientMsg::Exit {
+                            exit_reason: ExitReason::ServerUpgraded,
+                        },
+                    );
+                    remove_client!(*client_id, os_input, session_state, session_data);
+                }
+                for client_id in client_ids {
+                    if let Some(session_data) = session_data.read().unwrap().as_ref() {
+                        let _ = session_data
+                            .senders
+                            .send_to_screen(ScreenInstruction::RemoveClient(client_id));
+                        let _ = session_data
+                            .senders
+                            .send_to_plugin(PluginInstruction::RemoveClient(client_id));
+                    }
+                }
+                match session_data.read().unwrap().as_ref() {
+                    Some(session_data) => {
+                        log::info!("in-place upgrade requested; snapshotting session");
+                        let _ = session_data
+                            .senders
+                            .send_to_screen(ScreenInstruction::PrepareUpgrade);
+                    },
+                    None => log::warn!("upgrade requested before the session was initialised"),
+                }
             },
             ServerInstruction::KillSession => {
                 let client_ids = session_state.read().unwrap().client_ids();

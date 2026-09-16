@@ -291,6 +291,19 @@ pub enum ServiceCommand {
         #[clap(value_parser)]
         name: String,
     },
+    /// Freeze a running service's processes in place (cgroup v2 freezer: 0% CPU, memory kept,
+    /// instant thaw). Sugar for `zellij freeze svc-<name>`.
+    Freeze {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
+    },
+    /// Resume a frozen service. Sugar for `zellij thaw svc-<name>`.
+    Thaw {
+        /// Service name
+        #[clap(value_parser)]
+        name: String,
+    },
     /// Stop a service and delete its definition
     #[clap(visible_alias = "rm")]
     Remove {

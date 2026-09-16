@@ -313,6 +313,9 @@ pub enum ExitReason {
     Disconnect,
     WebClientsForbidden,
     KickedByHost,
+    /// Gezellij: the session's server replaced itself with a newer binary in place. Everything in
+    /// the session kept running; the client simply has to attach again.
+    ServerUpgraded,
     CustomExitStatus(i32),
     Error(String),
 }
@@ -322,6 +325,20 @@ impl Display for ExitReason {
         match self {
             Self::Normal => write!(f, "Bye from Zellij!"),
             Self::NormalDetached => write!(f, "Session detached"),
+            Self::ServerUpgraded => {
+                let session_tip = match crate::envs::get_session_name() {
+                    Ok(name) => format!("`zellij attach {}`", name),
+                    Err(_) => "`zellij attach <session>`".to_string(),
+                };
+                write!(
+                    f,
+                    "This session's server was upgraded to a newer version of Zellij.\n\
+                     Everything that was running in it kept running - only this client was \
+                     disconnected.\n\
+                     Attach again with: {}",
+                    session_tip
+                )
+            },
             Self::ForceDetached => write!(
                 f,
                 "Session was detached from this client (possibly because another client connected)"
