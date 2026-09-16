@@ -9,6 +9,9 @@ zellij freeze mywork     # freeze a named session
 zellij thaw mywork       # and back
 zellij freeze mywork --status
 zellij freeze mywork --pane-id terminal_3   # just one pane
+
+zellij service freeze api                   # the same, aimed at a service
+zellij service thaw api
 ```
 
 ## What it does
@@ -49,10 +52,20 @@ reacting to keys until thawed.
 
 ## How the CLI finds the cgroups
 
-The server records its per-session cgroup root in the session cache
-(`<cache dir>/zellij/<contract>/session_info/<session>/cgroup-root`). The `freeze`/`thaw`
+The server records its per-session cgroup root next to the session's socket
+(`<socket dir>/<session>.cgroup-root`). The `freeze`/`thaw`
 commands read that file and talk to `/sys/fs/cgroup` directly. That is deliberate: it works even
 when the server is busy or wedged, and it needs no protocol change.
+
+## Services
+
+`zellij service freeze <name>` and `zellij service thaw <name>` are sugar for the session commands
+above, aimed at the service's `svc-<name>` session. They refuse a service that is not running, and
+otherwise freeze or thaw every pane of it — the same `cgroup.freeze` writes.
+
+`zellij service list` reflects it in the `STATUS` column: a running service whose panes are *all*
+frozen shows `frozen`, one where only some are shows `partly frozen` (both in cyan, next to green
+`running` and red `stopped`). `--no-formatting` prints the same words without colour.
 
 ## Housekeeping
 
@@ -64,9 +77,9 @@ when the server is busy or wedged, and it needs no protocol change.
 
 ## Roadmap
 
-- `zellij service freeze|thaw <name>` as sugar over the session commands.
-- A frozen indicator in the pane frame and in the session manager (the server can poll
-  `cgroup.events`).
+- A frozen indicator in the pane frame and in the session manager. The session-manager plugin is
+  a WASM guest and cannot read `/sys/fs/cgroup` itself, so this needs the server to poll
+  `cgroup.events` and carry the state on the session info it already sends.
 - Auto-freeze: freeze a session after N minutes without an attached client, thaw on attach.
 - Memory/CPU limits per pane through the same cgroups (`memory.max`, `cpu.max`) once a
   controller is delegated.

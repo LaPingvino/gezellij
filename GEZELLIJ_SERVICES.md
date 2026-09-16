@@ -50,6 +50,8 @@ zellij service logs api -f          # keep streaming
 zellij service attach api           # the service keeps running after you detach
 
 # lifecycle
+zellij service freeze api           # pause its processes in the kernel (0% CPU, memory kept)
+zellij service thaw api             # and back
 zellij service stop api             # kills the svc-api session, keeps the definition
 zellij service start api            # idempotent: does nothing if already running
 zellij service remove api           # stop + delete the definition
@@ -69,7 +71,9 @@ want shell features, ask for a shell: `-- bash -c 'foo | bar'`.
 
 Aliases, because typing is work: `zellij svc` for `service`, `ls` for `list`, `rm` for `remove`,
 `a` for `attach`, `-t` for `--tail`. `zellij service list --no-formatting` drops the colours and
-alignment so you can pipe it somewhere.
+alignment so you can pipe it somewhere. Its `STATUS` column shows `running`, `stopped`, or —
+when the service is frozen — `frozen` / `partly frozen`; see
+[GEZELLIJ_FREEZE.md](GEZELLIJ_FREEZE.md).
 
 Service names are also file names and part of a session name, so keep them boring: letters, digits,
 `-`, `_` and `.`, up to 64 characters, not starting with `.` or `-`.
@@ -240,7 +244,8 @@ Phase 1 of [GEZELLIJ_PLAN.md](GEZELLIJ_PLAN.md) is deliberately small. Today:
 
 * **One pane per service.** A service is one supervised command, not a group. Multi-pane service
   layouts are not modelled yet.
-* **No cgroup freeze yet.** `freeze` / `thaw` (cgroups v2, 0% CPU hibernation) is Phase 2.
+* **Freeze is per session, not per service pane.** `zellij service freeze|thaw <name>` acts on
+  every pane of the service's session — see [GEZELLIJ_FREEZE.md](GEZELLIJ_FREEZE.md).
 * **No live upgrade yet.** Upgrading the binary still restarts the server and takes running
   processes with it. SCM_RIGHTS PTY handover is Phase 3.
 * **Logs are the pane scrollback.** `zellij service logs` reads what the pane holds, so history is

@@ -18,6 +18,15 @@ pub const SERVICE_SESSION_PREFIX: &str = "svc-";
 const SERVICE_BADGE_FULL: &str = "SERVICE, ";
 const SERVICE_BADGE_ABBR: &str = "SVC, ";
 
+// Gezellij: there is deliberately no FROZEN badge here yet. `zellij service list` can show a
+// frozen service because it reads `cgroup.events` under /sys/fs/cgroup directly, but this plugin
+// is a WASM guest: it has no filesystem access to /sys, and nothing in the session info the server
+// already sends (SessionInfo: tabs, panes, connected clients, ...) carries the freezer state of a
+// session's pane cgroups. Showing "frozen" here therefore needs a server-side change first - the
+// server polling `cgroup.events` for its panes and carrying the result on the session update event
+// - not anything the plugin can work out on its own. Until that exists, a badge here would have no
+// data path behind it.
+
 pub fn is_service_session(session_name: &str) -> bool {
     session_name.starts_with(SERVICE_SESSION_PREFIX)
 }

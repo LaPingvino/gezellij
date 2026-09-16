@@ -15,7 +15,10 @@ use zellij_utils::{
     consts::{session_info_folder_for_session, ZELLIJ_SOCK_DIR},
     home::find_default_config_dir,
     host_fabric::{
-        net, services::validate_service_name, systemd, ServiceDefinition, ServiceRegistry,
+        cgroups::{session_freeze_summary, set_session_frozen},
+        net,
+        services::validate_service_name,
+        systemd, ServiceDefinition, ServiceRegistry,
     },
     input::config::Config,
     sessions::{kill_session, session_exists},
@@ -23,6 +26,7 @@ use zellij_utils::{
 
 const GREEN: &str = "\u{1b}[32m";
 const RED: &str = "\u{1b}[31m";
+const CYAN: &str = "\u{1b}[36m";
 const RESET: &str = "\u{1b}[0m";
 
 fn fail(message: impl std::fmt::Display) -> ! {
@@ -407,7 +411,7 @@ fn list_services(opts: &CliArgs, registry: &ServiceRegistry, no_formatting: bool
     struct Row {
         name: String,
         status: &'static str,
-        running: bool,
+        colour: &'static str,
         restart: String,
         address: String,
         cwd: String,
@@ -416,11 +420,23 @@ fn list_services(opts: &CliArgs, registry: &ServiceRegistry, no_formatting: bool
     let rows: Vec<Row> = services
         .iter()
         .map(|service| {
-            let running = is_running(&service.session_name());
+            let session = service.session_name();
+            let running = is_running(&session);
+            // Gezellij: a running service whose panes are all frozen reads as 'frozen' rather
+            // than 'running'; an unreadable/absent cgroup record simply means 'running'.
+            let (status, colour) = if !running {
+                ("stopped", RED)
+            } else {
+                match session_freeze_summary(&session) {
+                    Ok(Some(summary)) if summary.all_frozen() => ("frozen", CYAN),
+                    Ok(Some(summary)) if summary.partly_frozen() => ("partly frozen", CYAN),
+                    _ => ("running", GREEN),
+                }
+            };
             Row {
                 name: service.name.clone(),
-                status: if running { "running" } else { "stopped" },
-                running,
+                status,
+                colour,
                 restart: service.restart.to_string(),
                 address: prefix
                     .as_ref()
@@ -471,8 +487,7 @@ fn list_services(opts: &CliArgs, registry: &ServiceRegistry, no_formatting: bool
         let status = if no_formatting {
             padded_status
         } else {
-            let colour = if row.running { GREEN } else { RED };
-            format!("{}{}{}", colour, padded_status, RESET)
+            format!("{}{}{}", row.colour, padded_status, RESET)
         };
         println!(
             "{:<name_w$}  {}  {:<restart_w$}  {:<address_w$}  {:<cwd_w$}  {}",
@@ -602,6 +617,58 @@ fn net_export(
     }
 }
 
+/// `zellij service freeze|thaw <name>`: the session-level freezer, aimed at a service.
+///
+/// Deliberately the same mechanism `zellij freeze` uses - it talks to `/sys/fs/cgroup` directly
+/// through the root the server recorded, so it keeps working when the service session is busy.
+fn freeze_service(service: &ServiceDefinition, freeze: bool) {
+    let session = service.session_name();
+    if !is_running(&session) {
+        fail(format!(
+            "Service '{}' is not running; start it with: zellij service start {}",
+            service.name, service.name
+        ));
+    }
+    let verb = if freeze { "Froze" } else { "Thawed" };
+    match set_session_frozen(&session, freeze) {
+        Ok(None) => fail(format!(
+            "Service '{}' has no pane cgroups. Its server was started without cgroup v2 \
+             delegation (or by an older version), so it cannot be frozen.",
+            service.name
+        )),
+        Ok(Some((0, 0))) => {
+            println!(
+                "Service '{}' has no terminal panes to act on.",
+                service.name
+            );
+        },
+        Ok(Some((ok, 0))) => {
+            println!(
+                "{} all {} panes of service '{}' (session {}).",
+                verb, ok, service.name, session
+            );
+            if freeze {
+                println!("Thaw with: zellij service thaw {}", service.name);
+            }
+        },
+        Ok(Some((ok, failed))) => {
+            eprintln!(
+                "{} {} of {} panes of service '{}' ({} failed).",
+                verb,
+                ok,
+                ok + failed,
+                service.name,
+                failed
+            );
+            std::process::exit(1);
+        },
+        Err(e) => fail(format!(
+            "Could not look up the cgroups of service '{}': {}",
+            service.name, e
+        )),
+    }
+}
+
 pub(crate) fn run_service_command(opts: CliArgs, command: ServiceCommand) {
     let registry = registry_from_opts(&opts);
     match command {
@@ -671,6 +738,14 @@ pub(crate) fn run_service_command(opts: CliArgs, command: ServiceCommand) {
         ServiceCommand::Stop { name } => {
             let service = load_or_fail(&registry, &name);
             stop_service(&service);
+        },
+        ServiceCommand::Freeze { name } => {
+            let service = load_or_fail(&registry, &name);
+            freeze_service(&service, true);
+        },
+        ServiceCommand::Thaw { name } => {
+            let service = load_or_fail(&registry, &name);
+            freeze_service(&service, false);
         },
         ServiceCommand::Remove { name } => {
             let service = load_or_fail(&registry, &name);
