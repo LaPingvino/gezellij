@@ -461,7 +461,90 @@ fn create_ipc_pipe(teardown: Option<TerminalTeardown>) -> PathBuf {
 /// On Unix the server daemonizes (double-fork) inside start_server(), so
 /// the intermediate child exits immediately and `cmd.status()` returns.
 #[cfg(not(windows))]
+/// Gezellij: unit names accept a narrow character set; session names are looser.
+#[cfg(not(windows))]
+fn sanitize_unit_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Gezellij: whether we already live in the `user@<uid>.service` subtree, which `systemd`
+/// delegates to us (so sub-cgroups can be created and the freezer works).
+#[cfg(not(windows))]
+fn already_in_delegated_cgroup() -> bool {
+    std::fs::read_to_string("/proc/self/cgroup")
+        .map(|c| c.contains("/user@"))
+        .unwrap_or(false)
+}
+
+/// Gezellij: start the server inside a `systemd --user` scope.
+///
+/// A server inherits the cgroup of whatever started it. Launched from a login shell that is a
+/// plain `session-N.scope`, that cgroup belongs to root and we may not create sub-cgroups in it,
+/// which silently disables `zellij freeze`/`thaw` and any future per-pane resource limits. A
+/// scope under `user@<uid>.service` is delegated to us instead. (This is the same thing byobu
+/// gets by launching tmux through `systemd-run`.)
+///
+/// Returns `None` when the attempt was not applicable, so the caller falls back to spawning the
+/// server directly - which is exactly the old behaviour, minus the freezer.
+#[cfg(not(windows))]
+fn spawn_server_in_user_scope(socket_path: &Path, debug: bool) -> Option<io::Result<()>> {
+    if std::env::var_os("GEZELLIJ_NO_SYSTEMD_SCOPE").is_some() {
+        return None;
+    }
+    // no user manager to talk to, or we are already somewhere delegated
+    std::env::var_os("XDG_RUNTIME_DIR")?;
+    if already_in_delegated_cgroup() {
+        return None;
+    }
+    let session = socket_path
+        .file_name()
+        .map(|n| sanitize_unit_name(&n.to_string_lossy()))
+        .unwrap_or_else(|| "session".to_string());
+    let exe = current_exe().ok()?;
+    let mut cmd = Command::new("systemd-run");
+    cmd.arg("--user")
+        .arg("--scope")
+        .arg("--quiet")
+        .arg("--collect")
+        .arg(format!(
+            "--unit=gezellij-{}-{}",
+            session,
+            std::process::id()
+        ))
+        .arg(exe)
+        .arg("--server")
+        .arg(socket_path);
+    if debug {
+        cmd.arg("--debug");
+    }
+    match cmd.status() {
+        // systemd-run is missing, or the user manager refused: let the caller do it the old way
+        Err(_) => None,
+        Ok(status) if !status.success() => {
+            log::warn!(
+                "could not start the server in a systemd --user scope ({}); \
+                 falling back - `zellij freeze` will not be available for this session",
+                status
+            );
+            None
+        },
+        Ok(_) => Some(Ok(())),
+    }
+}
+
 pub fn spawn_server(socket_path: &Path, debug: bool) -> io::Result<()> {
+    #[cfg(not(windows))]
+    if let Some(result) = spawn_server_in_user_scope(socket_path, debug) {
+        return result;
+    }
     let mut cmd = Command::new(current_exe()?);
     cmd.arg("--server").arg(socket_path);
     if debug {

@@ -41,14 +41,23 @@ reacting to keys until thawed.
 
 - Linux with the unified cgroup hierarchy (cgroup v2), which is the default on every current
   distribution.
-- Your processes must be allowed to create sub-cgroups where the server lives. Under
-  `systemd --user` sessions this is always the case: the whole `user@<uid>.service` subtree is
-  delegated to you, and `cgroup.freeze` is part of the core interface, so no controller needs
-  enabling and no root is involved. Gezellij checked this on Arch: creating a cgroup, moving a
-  process, freezing and thawing all work as a plain user.
-- Where that delegation is missing (some containers, non-systemd inits, a server started as a
-  system service without `Delegate=yes`) the server logs one warning and runs panes exactly as
-  upstream Zellij does. `zellij freeze` then tells you the session has no pane cgroups.
+- Your processes must be allowed to create sub-cgroups where the server lives, and **a server
+  inherits the cgroup of whatever started it**. That is the catch: a login shell (ssh, a console)
+  is a `session-N.scope` owned by root, where you may *not* create sub-cgroups. Only the
+  `user@<uid>.service` subtree is delegated to you (`systemctl show user@$UID.service -p Delegate`
+  says `Delegate=yes`), and `cgroup.freeze` is part of the core interface there, so no controller
+  needs enabling and no root is involved.
+- So Gezellij puts its own server in a delegated scope rather than trusting where it was
+  launched: when it daemonizes a server it does so through
+  `systemd-run --user --scope --collect --unit=gezellij-<session>-<pid>`, landing in
+  `user@<uid>.service/app.slice/`. (This is the same trick byobu uses to launch tmux — which is
+  why a Gezellij started *from inside byobu* could freeze before this was fixed, and one started
+  from a plain login shell could not.) A server that is already inside `user@<uid>.service` —
+  started from a `systemd --user` unit, e.g. `zellij service run` — is left alone.
+- Where none of that is available (no `systemd-run`, no `XDG_RUNTIME_DIR`, some containers,
+  non-systemd inits) the scope attempt is skipped or falls back with a warning, the server starts
+  exactly as upstream Zellij would, and `zellij freeze` tells you the session has no pane cgroups.
+  `GEZELLIJ_NO_SYSTEMD_SCOPE=1` forces that fallback.
 
 ## How the CLI finds the cgroups
 
