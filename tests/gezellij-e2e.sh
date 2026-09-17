@@ -764,15 +764,39 @@ attach_client() {
 type_at() { printf '%s' "$2" > "$ROOT/tmp/$1.fifo"; }
 
 # client_count <session>
-client_count() { z --session "$1" action list-clients 2>/dev/null | tail -n +2 | grep -c . ; }
+client_count() { list_clients "$1" | tail -n +2 | grep -c . ; }
+
+# list-clients is a round trip through the server's Screen thread. On a loaded box - or a debug
+# build, which is what this suite runs - it can occasionally come back empty, and every helper
+# below turns an empty answer into "there is no such client", which then fails an assertion about
+# something else entirely. So ask again a few times before believing it.
+list_clients() {
+    local out i
+    # Deliberately few attempts: this helper is also called from inside `wait_for` loops, which
+    # retry anyway, and a long retry here would multiply with theirs on a genuinely dead session.
+    for i in 1 2 3; do
+        out=$(z --session "$1" action list-clients 2>"$ROOT/tmp/list-clients.err")
+        case "$out" in
+            *CLIENT_ID*) printf '%s\n' "$out"; return 0 ;;
+        esac
+        # Say *why* on the way past. An empty answer used to be indistinguishable from "no
+        # clients", which is how a one-second action timeout hid for so long; if this helper is
+        # ever papering over a real fault, this is the line that will show it.
+        printf 'list-clients came back empty (attempt %s), stderr: %s\n' \
+               "$i" "$(tr '\n' ' ' < "$ROOT/tmp/list-clients.err")" >&2
+        sleep 1
+    done
+    printf '%s\n' "$out"
+    return 1
+}
 
 # client_line <session> <client_id>
-client_line() { z --session "$1" action list-clients 2>/dev/null | awk -v id="$2" '$1 == id || $1 == id"*"'; }
+client_line() { list_clients "$1" | awk -v id="$2" '$1 == id || $1 == id"*"'; }
 
 # Client ids are assigned (and recycled) by the server, so a test must never assume that the
 # first client it attached is client 1. Look them up by the one thing we do control: their size.
 # client_line_by_size <session> <ROWSxCOLS> / client_id_by_size <session> <ROWSxCOLS>
-client_line_by_size() { z --session "$1" action list-clients 2>/dev/null | awk -v s="$2" '$2 == s'; }
+client_line_by_size() { list_clients "$1" | awk -v s="$2" '$2 == s'; }
 client_id_by_size() { client_line_by_size "$1" "$2" | awk '{gsub(/\*/, "", $1); print $1}'; }
 
 # pane_rows <session> <pane_id> -- ROWS as reported by `list-panes --geometry`
@@ -813,7 +837,7 @@ test_client_sizes_and_kick() {
     assert_eq "$(pane_rows "$session" terminal_0)" "18" \
               "a second, smaller client shrinks the tab for everybody (the incident)"
 
-    out=$(z --session "$session" action list-clients 2>&1)
+    out=$(list_clients "$session")
     assert_contains "$out" "SIZE" "list-clients has a SIZE column"
     assert_contains "$out" "IDLE" "list-clients has an IDLE column"
     assert_true "[ -n \"\$(client_id_by_size '$session' 60x200)\" ]" \
@@ -854,7 +878,7 @@ test_client_sizes_and_kick() {
 # ---------------------------------------------------------------------------
 
 test_client_parking() {
-    local session=e2epark big small conf i
+    local session=e2epark big small conf i rows
     write_pty_helpers
     track_session "$session"
     kill_session_quietly "$session"
@@ -872,8 +896,18 @@ EOF
     attach_client small 20 80 "$session" || { fail "small client attached"; kill_client_quietly "$big"; return; }
     small=$CLIENT_PID
 
-    wait_for "[ \"\$(pane_rows '$session' terminal_0)\" = 18 ]" 15
-    assert_eq "$(pane_rows "$session" terminal_0)" "18" "both clients attached: the tab is capped at 20x80"
+    # Tickle *both* clients while we wait for the cap to show up: a single `pane_rows` round trip
+    # costs about a second on a debug build, so the polling alone can outlast a 5s parking timeout
+    # and we would be asserting on an already-parked client.
+    rows=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        rows=$(pane_rows "$session" terminal_0)
+        [ "$rows" = "18" ] && break
+        type_at big ' '
+        type_at small ' '
+        sleep 1
+    done
+    assert_eq "$rows" "18" "both clients attached: the tab is capped at 20x80"
 
     # Keep the big client demonstrably present while the small one goes quiet.
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do

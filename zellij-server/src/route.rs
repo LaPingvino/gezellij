@@ -35,7 +35,16 @@ use zellij_utils::{
 
 use crate::ClientId;
 
-const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
+// Gezellij: upstream waited one second for an action to complete and, on expiry, printed
+// *nothing at all* - the error went only to the server log. That silence is a bad failure mode:
+// `zellij action list-clients` returning an empty string looks like "no clients" rather than
+// "I gave up". It also assumes a quiet machine and an optimised build; on a loaded server (or
+// any debug build, which is what the e2e suite runs) a query that walks panes and processes can
+// legitimately take longer, and then the command lies.
+//
+// So: a generous budget, and say so when it is exceeded. A query that takes two seconds is
+// mildly annoying; one that silently returns nothing costs an afternoon of debugging.
+const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
@@ -73,7 +82,18 @@ pub fn wait_for_action_completion(
             .block_on(async { tokio::time::timeout(ACTION_COMPLETION_TIMEOUT, receiver).await })
         {
             Ok(Ok(result)) => result,
-            Err(_) | Ok(Err(_)) => {
+            // The sender was dropped: the action's arm never handed the `completion_tx` to a
+            // `NotificationEnd`, so nobody was ever going to answer. This returns instantly and is
+            // normal for actions that have nothing to report - it is emphatically *not* a timeout,
+            // and saying so would put a scary message in front of every such action.
+            Ok(Err(_)) => ActionCompletionResult {
+                exit_status: None,
+                affected_pane_id: None,
+                affected_tab_id: None,
+                error_message: None,
+                stdout_message: None,
+            },
+            Err(_) => {
                 log::error!(
                     "Action {} did not complete within {:?} timeout",
                     action_name,
@@ -83,7 +103,12 @@ pub fn wait_for_action_completion(
                     exit_status: None,
                     affected_pane_id: None,
                     affected_tab_id: None,
-                    error_message: None,
+                    error_message: Some(format!(
+                        "`{}` did not complete within {:?}. The session is probably just busy - \
+                         try again. (Nothing was printed above because the answer never arrived, \
+                         not because there was nothing to report.)",
+                        action_name, ACTION_COMPLETION_TIMEOUT
+                    )),
                     stdout_message: None,
                 }
             },
