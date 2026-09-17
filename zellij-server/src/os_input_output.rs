@@ -536,6 +536,36 @@ impl ServerOsApi for ServerOsInputOutput {
         {
             sender.send_or_buffer(msg).with_context(err_context)
         } else {
+            // Gezellij: there is no sender for this client, so this message is going nowhere.
+            //
+            // Returning `Ok(())` here - which is upstream's behaviour and is kept, because a
+            // client disconnecting while the server is mid-broadcast is ordinary and must not
+            // become an error - has one nasty consequence: `send_to_client!` sees success and
+            // logs nothing, so a *reply to a CLI action* can vanish leaving no trace anywhere.
+            // `zellij action list-clients` then prints nothing, says nothing on stderr and exits
+            // 0, which is indistinguishable from "there are no clients". Observed roughly one run
+            // in five of the e2e suite, on `list-clients` and on `kick-client` - both of which
+            // deliver their entire output through `ServerInstruction::Log`.
+            //
+            // So: still not an error, but no longer silent - for the messages where silence
+            // actually costs something. A dropped `Render` for a client that is on its way out is
+            // the normal case and happens several times per disconnect; warning about those would
+            // bury the one line that matters. Messages that carry an answer somebody is waiting
+            // for get a warning, everything else gets a debug line.
+            if msg.is_reply_to_a_waiting_caller() {
+                log::warn!(
+                    "dropping {} for client {}: it has no sender (already disconnected?). If this \
+                     was the reply to a CLI action, that command just printed nothing at all.",
+                    msg.name(),
+                    client_id,
+                );
+            } else {
+                log::debug!(
+                    "dropping {} for client {}: it has no sender",
+                    msg.name(),
+                    client_id,
+                );
+            }
             Ok(())
         }
     }

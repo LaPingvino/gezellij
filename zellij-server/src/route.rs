@@ -46,6 +46,26 @@ use crate::ClientId;
 // mildly annoying; one that silently returns nothing costs an afternoon of debugging.
 const ACTION_COMPLETION_TIMEOUT: Duration = Duration::from_secs(10);
 
+// Gezellij: the same one-second bet, made again in five more places.
+//
+// A CLI query like `list-panes` asks a worker thread for data and waits. Upstream waited one
+// second and, on expiry, `list-panes` sent "Timeout listing panes" to stderr and nothing to
+// stdout - so `zellij action list-panes --geometry` printed an empty table and any script parsing
+// it read that as "there are no panes". Same failure as the action timeout above, same cause: one
+// second assumes a quiet machine and an optimised build, and this is neither.
+//
+// Kept comfortably below ACTION_COMPLETION_TIMEOUT so that when something really is wedged, the
+// inner query gives up first and the caller gets "Timeout listing panes" - which names the thing
+// that hung - rather than the outer, vaguer "did not complete within".
+const QUERY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Gezellij: per-pane enrichment (the RUNNING_COMMAND and CWD columns of `list-panes`), paid once
+// for every pane in the session, so it stays tight - but a hundred milliseconds was tight enough
+// that a merely busy pty thread would blank the column. And it was blanked *silently*: the call
+// sites are `if let Ok(..)`, with no else, so a missing command looked like a pane that isn't
+// running anything rather than a question that went unanswered.
+const PANE_ENRICHMENT_TIMEOUT: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Clone)]
 pub struct ActionCompletionResult {
     pub exit_status: Option<i32>,
@@ -3025,7 +3045,6 @@ fn request_panes_from_screen(
     show_all: bool,
 ) -> Result<Option<ListPanesResponse>> {
     use crossbeam::channel::{unbounded, RecvTimeoutError};
-    use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
     senders.send_to_screen(ScreenInstruction::ListPanes {
@@ -3033,7 +3052,7 @@ fn request_panes_from_screen(
         response_channel: response_sender,
     })?;
 
-    match response_receiver.recv_timeout(Duration::from_secs(1)) {
+    match response_receiver.recv_timeout(QUERY_RESPONSE_TIMEOUT) {
         Ok(entries) => Ok(Some(entries)),
         Err(RecvTimeoutError::Timeout) => {
             log::error!("ListPanes timed out waiting for Screen response");
@@ -3051,7 +3070,6 @@ fn request_tabs_from_screen(
     client_id: ClientId,
 ) -> Result<Option<ListTabsResponse>> {
     use crossbeam::channel::{unbounded, RecvTimeoutError};
-    use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
     senders.send_to_screen(ScreenInstruction::ListTabs {
@@ -3059,7 +3077,7 @@ fn request_tabs_from_screen(
         response_channel: response_sender,
     })?;
 
-    match response_receiver.recv_timeout(Duration::from_secs(1)) {
+    match response_receiver.recv_timeout(QUERY_RESPONSE_TIMEOUT) {
         Ok(entries) => Ok(Some(entries)),
         Err(RecvTimeoutError::Timeout) => {
             log::error!("ListTabs timed out waiting for Screen response");
@@ -3077,7 +3095,6 @@ fn request_current_tab_info_from_screen(
     client_id: ClientId,
 ) -> Result<Option<TabInfo>> {
     use crossbeam::channel::{unbounded, RecvTimeoutError};
-    use std::time::Duration;
 
     let (response_sender, response_receiver) = unbounded();
     senders.send_to_screen(ScreenInstruction::GetCurrentTabInfo {
@@ -3085,7 +3102,7 @@ fn request_current_tab_info_from_screen(
         response_channel: response_sender,
     })?;
 
-    match response_receiver.recv_timeout(Duration::from_secs(1)) {
+    match response_receiver.recv_timeout(QUERY_RESPONSE_TIMEOUT) {
         Ok(tab_info_opt) => Ok(tab_info_opt),
         Err(RecvTimeoutError::Timeout) => {
             log::error!("GetCurrentTabInfo timed out waiting for Screen response");
@@ -3118,7 +3135,6 @@ fn enrich_pane_with_running_command(
     senders: &ThreadSenders,
 ) -> Result<()> {
     use crossbeam::channel::unbounded;
-    use std::time::Duration;
     use zellij_utils::data::GetPaneRunningCommandResponse;
 
     let (cmd_sender, cmd_receiver) = unbounded();
@@ -3127,10 +3143,21 @@ fn enrich_pane_with_running_command(
         response_channel: cmd_sender,
     })?;
 
-    if let Ok(GetPaneRunningCommandResponse::Ok(command_vec)) =
-        cmd_receiver.recv_timeout(Duration::from_millis(100))
-    {
-        entry.pane_command = Some(command_vec.join(" "));
+    match cmd_receiver.recv_timeout(PANE_ENRICHMENT_TIMEOUT) {
+        Ok(GetPaneRunningCommandResponse::Ok(command_vec)) => {
+            entry.pane_command = Some(command_vec.join(" "));
+        },
+        Ok(_) => {},
+        Err(_) => {
+            // Gezellij: leave the column empty, as before, but say why. An empty RUNNING_COMMAND
+            // otherwise reads as "this pane is running nothing".
+            log::warn!(
+                "pane {:?}: the pty thread did not answer within {:?}, so `list-panes` will show \
+                 no running command for it",
+                pane_id,
+                PANE_ENRICHMENT_TIMEOUT,
+            );
+        },
     }
 
     Ok(())
@@ -3142,7 +3169,6 @@ fn enrich_pane_with_cwd(
     senders: &ThreadSenders,
 ) -> Result<()> {
     use crossbeam::channel::unbounded;
-    use std::time::Duration;
     use zellij_utils::data::GetPaneCwdResponse;
 
     let (cwd_sender, cwd_receiver) = unbounded();
@@ -3151,8 +3177,19 @@ fn enrich_pane_with_cwd(
         response_channel: cwd_sender,
     })?;
 
-    if let Ok(GetPaneCwdResponse::Ok(cwd)) = cwd_receiver.recv_timeout(Duration::from_millis(100)) {
-        entry.pane_cwd = Some(cwd.to_string_lossy().to_string());
+    match cwd_receiver.recv_timeout(PANE_ENRICHMENT_TIMEOUT) {
+        Ok(GetPaneCwdResponse::Ok(cwd)) => {
+            entry.pane_cwd = Some(cwd.to_string_lossy().to_string());
+        },
+        Ok(_) => {},
+        Err(_) => {
+            log::warn!(
+                "pane {:?}: the pty thread did not answer within {:?}, so `list-panes` will show \
+                 no cwd for it",
+                pane_id,
+                PANE_ENRICHMENT_TIMEOUT,
+            );
+        },
     }
 
     Ok(())

@@ -304,6 +304,45 @@ pub enum ServerToClientMsg {
     },
 }
 
+impl ServerToClientMsg {
+    /// Gezellij: is this message somebody's answer? A `zellij action ...` invocation blocks until
+    /// one of these arrives, so losing one means a command that printed nothing and said nothing
+    /// about it. Losing a `Render` for a client that is disconnecting, by contrast, is routine.
+    pub fn is_reply_to_a_waiting_caller(&self) -> bool {
+        matches!(
+            self,
+            Self::Log { .. } | Self::LogError { .. } | Self::CliPipeOutput { .. } | Self::Exit { .. }
+        )
+    }
+
+    /// Gezellij: the variant name on its own, for logging a message we are about to drop.
+    /// `{:?}` would be more informative and would also paste an entire screen render into the
+    /// log, so: just the name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Render { .. } => "Render",
+            Self::UnblockInputThread => "UnblockInputThread",
+            Self::Exit { .. } => "Exit",
+            Self::Connected => "Connected",
+            Self::Log { .. } => "Log",
+            Self::LogError { .. } => "LogError",
+            Self::SwitchSession { .. } => "SwitchSession",
+            Self::UnblockCliPipeInput { .. } => "UnblockCliPipeInput",
+            Self::CliPipeOutput { .. } => "CliPipeOutput",
+            Self::QueryTerminalSize => "QueryTerminalSize",
+            Self::SetSoftKeyboard { .. } => "SetSoftKeyboard",
+            Self::StartWebServer => "StartWebServer",
+            Self::RenamedSession { .. } => "RenamedSession",
+            Self::ConfigFileUpdated => "ConfigFileUpdated",
+            Self::PaneRenderUpdate { .. } => "PaneRenderUpdate",
+            Self::SubscribedPaneClosed { .. } => "SubscribedPaneClosed",
+            Self::ForwardQueryToHost { .. } => "ForwardQueryToHost",
+            Self::EmitNestedSessionFrame { .. } => "EmitNestedSessionFrame",
+            Self::MobileState { .. } => "MobileState",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ExitReason {
     Normal,
