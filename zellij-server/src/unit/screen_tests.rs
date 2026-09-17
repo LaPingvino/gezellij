@@ -8,7 +8,7 @@ use crate::{
 use insta::assert_snapshot;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use zellij_utils::cli::CliAction;
+use zellij_utils::cli::{CliAction, NewPaneArgs};
 use zellij_utils::data::{Event, EventType, Resize, Style, WebSharing};
 use zellij_utils::errors::{prelude::*, ErrorContext};
 use zellij_utils::input::actions::Action;
@@ -3543,37 +3543,10 @@ pub fn send_cli_new_pane_action_with_default_parameters() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_new_pane_action = CliAction::NewPane {
-        direction: None,
-        command: vec![],
-        plugin: None,
-        cwd: None,
-        floating: false,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
+    let cli_new_pane_action = CliAction::NewPane(NewPaneArgs {
         borderless: Some(false),
-        tab_id: None,
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_new_pane_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for actions to be
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -3654,37 +3627,11 @@ pub fn send_cli_new_pane_action_with_split_direction() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_new_pane_action = CliAction::NewPane {
+    let cli_new_pane_action = CliAction::NewPane(NewPaneArgs {
         direction: Some(Direction::Right),
-        command: vec![],
-        plugin: None,
-        cwd: None,
-        floating: false,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
         borderless: Some(false),
-        tab_id: None,
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_new_pane_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for actions to be
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -3711,37 +3658,13 @@ pub fn send_cli_new_pane_action_with_command_and_cwd() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_new_pane_action = CliAction::NewPane {
+    let cli_new_pane_action = CliAction::NewPane(NewPaneArgs {
         direction: Some(Direction::Right),
         command: vec!["htop".into()],
-        plugin: None,
         cwd: Some("/some/folder".into()),
-        floating: false,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
         borderless: Some(false),
-        tab_id: None,
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_new_pane_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for actions to be
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -3779,37 +3702,16 @@ pub fn send_cli_new_pane_action_with_floating_pane_and_coordinates() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_new_pane_action = CliAction::NewPane {
+    let cli_new_pane_action = CliAction::NewPane(NewPaneArgs {
         direction: Some(Direction::Right),
         command: vec!["htop".into()],
-        plugin: None,
         cwd: Some("/some/folder".into()),
         floating: true,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
         x: Some("10".to_owned()),
-        y: None,
         width: Some("20%".to_owned()),
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
         borderless: Some(false),
-        tab_id: None,
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_new_pane_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100)); // give time for actions to be
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -5608,37 +5510,12 @@ pub fn send_cli_new_pane_in_place_with_close_replaced_pane() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_action = CliAction::NewPane {
-        direction: None,
+    let cli_action = CliAction::NewPane(NewPaneArgs {
         command: vec!["bash".into()],
-        plugin: None,
-        cwd: None,
-        floating: false,
         in_place: true,
         close_replaced_pane: true,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
-        borderless: None,
-        tab_id: None,
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -8400,37 +8277,12 @@ pub fn send_cli_new_pane_action_with_tab_id() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_new_pane_action = CliAction::NewPane {
+    let cli_new_pane_action = CliAction::NewPane(NewPaneArgs {
         direction: Some(Direction::Right),
-        command: vec![],
-        plugin: None,
-        cwd: None,
-        floating: false,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
         borderless: Some(false),
         tab_id: Some(0),
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_new_pane_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -8464,37 +8316,11 @@ pub fn send_cli_new_floating_pane_action_with_tab_id() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_new_pane_action = CliAction::NewPane {
-        direction: None,
-        command: vec![],
-        plugin: None,
-        cwd: None,
+    let cli_new_pane_action = CliAction::NewPane(NewPaneArgs {
         floating: true,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
-        borderless: None,
         tab_id: Some(0),
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_new_pane_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -8577,37 +8403,12 @@ pub fn send_cli_new_pane_action_with_tab_id_and_direction() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_new_pane_action = CliAction::NewPane {
+    let cli_new_pane_action = CliAction::NewPane(NewPaneArgs {
         direction: Some(Direction::Right),
-        command: vec![],
-        plugin: None,
-        cwd: None,
-        floating: false,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
         borderless: Some(false),
         tab_id: Some(0),
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_new_pane_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -8640,37 +8441,12 @@ pub fn send_cli_new_pane_action_with_tab_id_and_stacked() {
         PtyInstruction::Exit,
         pty_receiver
     );
-    let cli_new_pane_action = CliAction::NewPane {
-        direction: None,
+    let cli_new_pane_action = CliAction::NewPane(NewPaneArgs {
         command: vec!["ls".into()],
-        plugin: None,
-        cwd: None,
-        floating: false,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
         stacked: true,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
-        borderless: None,
         tab_id: Some(0),
-    };
+        ..Default::default()
+    });
     send_cli_action_to_server(&session_metadata, cli_new_pane_action, client_id);
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);

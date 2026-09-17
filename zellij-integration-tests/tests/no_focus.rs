@@ -4,40 +4,14 @@ use std::time::Instant;
 use zellij_integration_tests::{
     claim_first_terminal_and_wait_for_prompt, default_timeout, start_zellij, FakePtyHandle, PROMPT,
 };
-use zellij_utils::cli::CliAction;
+use zellij_utils::cli::{CliAction, NewPaneArgs};
 
 fn no_focus_new_pane_action(command: &[&str]) -> CliAction {
-    CliAction::NewPane {
-        direction: None,
+    CliAction::NewPane(NewPaneArgs {
         command: command.iter().map(|part| part.to_string()).collect(),
-        plugin: None,
-        cwd: None,
-        floating: false,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
         no_focus: true,
-        borderless: None,
-        tab_id: None,
-    }
+        ..Default::default()
+    })
 }
 
 fn no_focus_new_tab_action() -> CliAction {
@@ -112,7 +86,7 @@ fn new_pane_without_no_focus_moves_input_to_the_new_pane() {
     let original_pane = claim_first_terminal_and_wait_for_prompt(&zellij);
 
     let mut focusing_action = no_focus_new_pane_action(&["focused-command"]);
-    if let CliAction::NewPane { no_focus, .. } = &mut focusing_action {
+    if let CliAction::NewPane(NewPaneArgs { no_focus, .. }) = &mut focusing_action {
         *no_focus = false;
     }
     zellij.run_cli_action(focusing_action);

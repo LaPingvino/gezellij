@@ -7,7 +7,7 @@ mod upgrade_commands;
 
 use clap::Parser;
 use zellij_utils::{
-    cli::{CliAction, CliArgs, Command, Sessions},
+    cli::{CliAction, CliArgs, Command, NewPaneArgs, Sessions},
     consts::{create_config_and_cache_folders, VERSION},
     data::UnblockCondition,
     envs,
@@ -89,20 +89,17 @@ fn main() {
                 None
             };
 
-            let command_cli_action = CliAction::NewPane {
+            let command_cli_action = CliAction::NewPane(NewPaneArgs {
                 command,
-                plugin: None,
                 direction,
                 cwd,
                 floating,
                 in_place,
                 close_replaced_pane,
-                pane_id: None,
                 name,
                 close_on_exit,
                 start_suspended,
                 restart,
-                configuration: None,
                 skip_plugin_cache,
                 x,
                 y,
@@ -111,15 +108,13 @@ fn main() {
                 pinned,
                 stacked,
                 blocking,
-                block_until_exit_success: false,
-                block_until_exit_failure: false,
-                block_until_exit: false,
                 unblock_condition,
                 near_current_pane,
                 no_focus,
                 borderless,
                 tab_id,
-            };
+                ..Default::default()
+            });
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);
         }
@@ -144,19 +139,12 @@ fn main() {
             let stacked = false;
             let blocking = false;
             let unblock_condition = None;
-            let command_cli_action = CliAction::NewPane {
-                command: vec![],
+            let command_cli_action = CliAction::NewPane(NewPaneArgs {
                 plugin: Some(url),
-                direction: None,
                 cwd,
                 floating,
                 in_place,
                 close_replaced_pane,
-                pane_id: None,
-                name: None,
-                close_on_exit: false,
-                start_suspended: false,
-                restart: None,
                 configuration,
                 skip_plugin_cache,
                 x,
@@ -166,15 +154,12 @@ fn main() {
                 pinned,
                 stacked,
                 blocking,
-                block_until_exit_success: false,
-                block_until_exit_failure: false,
-                block_until_exit: false,
                 unblock_condition,
-                near_current_pane: false,
                 no_focus,
                 borderless,
                 tab_id,
-            };
+                ..Default::default()
+            });
             commands::send_action_to_session(command_cli_action, opts.session, config);
             std::process::exit(0);
         }

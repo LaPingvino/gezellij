@@ -5,7 +5,7 @@ use super::layout::{
     FloatingPaneLayout, Layout, PluginAlias, RunPlugin, RunPluginLocation, RunPluginOrAlias,
     SwapFloatingLayout, SwapTiledLayout, TabLayoutInfo, TiledPaneLayout,
 };
-use crate::cli::CliAction;
+use crate::cli::{CliAction, NewPaneArgs};
 use crate::data::{
     CommandOrPlugin, Direction, KeyWithModifier, LayoutInfo, NewPanePlacement, OriginatingPlugin,
     PaneId, Resize, UnblockCondition,
@@ -1094,7 +1094,7 @@ impl Action {
                 Some(id) => Ok(vec![Action::ToggleActiveSyncTabByTabId { id: id as u64 }]),
                 None => Ok(vec![Action::ToggleActiveSyncTab]),
             },
-            CliAction::NewPane {
+            CliAction::NewPane(NewPaneArgs {
                 direction,
                 command,
                 plugin,
@@ -1124,7 +1124,7 @@ impl Action {
                 no_focus,
                 borderless,
                 tab_id,
-            } => {
+            }) => {
                 let pane_id_to_replace = match pane_id {
                     Some(pane_id_str) => match PaneId::from_str(&pane_id_str) {
                         Ok(parsed_pane_id) => Some(parsed_pane_id),
@@ -3685,37 +3685,11 @@ mod tests {
 
     #[test]
     fn test_new_pane_tiled_with_tab_id() {
-        let cli_action = CliAction::NewPane {
+        let cli_action = CliAction::NewPane(NewPaneArgs {
             direction: Some(Direction::Right),
-            command: vec![],
-            plugin: None,
-            cwd: None,
-            floating: false,
-            in_place: false,
-            close_replaced_pane: false,
-            pane_id: None,
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
-            stacked: false,
-            blocking: false,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
             tab_id: Some(3),
-        };
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -3730,37 +3704,9 @@ mod tests {
 
     #[test]
     fn test_new_pane_tiled_without_tab_id() {
-        let cli_action = CliAction::NewPane {
-            direction: None,
-            command: vec![],
-            plugin: None,
-            cwd: None,
-            floating: false,
-            in_place: false,
-            close_replaced_pane: false,
-            pane_id: None,
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
-            stacked: false,
-            blocking: false,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
-            tab_id: None,
-        };
+        let cli_action = CliAction::NewPane(NewPaneArgs {
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -3775,37 +3721,12 @@ mod tests {
 
     #[test]
     fn test_new_in_place_pane_with_pane_id_to_replace() {
-        let cli_action = CliAction::NewPane {
-            direction: None,
-            command: vec![],
-            plugin: None,
-            cwd: None,
-            floating: false,
+        let cli_action = CliAction::NewPane(NewPaneArgs {
             in_place: true,
             close_replaced_pane: true,
             pane_id: Some("terminal_4".to_string()),
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
-            stacked: false,
-            blocking: false,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
-            tab_id: None,
-        };
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -3822,37 +3743,11 @@ mod tests {
 
     #[test]
     fn test_new_in_place_pane_with_malformed_pane_id() {
-        let cli_action = CliAction::NewPane {
-            direction: None,
-            command: vec![],
-            plugin: None,
-            cwd: None,
-            floating: false,
+        let cli_action = CliAction::NewPane(NewPaneArgs {
             in_place: true,
-            close_replaced_pane: false,
             pane_id: Some("not_a_pane".to_string()),
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
-            stacked: false,
-            blocking: false,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
-            tab_id: None,
-        };
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Malformed pane id"));
@@ -3860,37 +3755,11 @@ mod tests {
 
     #[test]
     fn test_new_pane_floating_with_tab_id() {
-        let cli_action = CliAction::NewPane {
-            direction: None,
-            command: vec![],
-            plugin: None,
-            cwd: None,
+        let cli_action = CliAction::NewPane(NewPaneArgs {
             floating: true,
-            in_place: false,
-            close_replaced_pane: false,
-            pane_id: None,
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
-            stacked: false,
-            blocking: false,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
             tab_id: Some(5),
-        };
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -3905,37 +3774,12 @@ mod tests {
 
     #[test]
     fn test_new_pane_stacked_with_tab_id() {
-        let cli_action = CliAction::NewPane {
-            direction: None,
+        let cli_action = CliAction::NewPane(NewPaneArgs {
             command: vec!["ls".into()],
-            plugin: None,
-            cwd: None,
-            floating: false,
-            in_place: false,
-            close_replaced_pane: false,
-            pane_id: None,
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
             stacked: true,
-            blocking: false,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
             tab_id: Some(1),
-        };
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -3950,37 +3794,12 @@ mod tests {
 
     #[test]
     fn test_new_pane_blocking_with_tab_id() {
-        let cli_action = CliAction::NewPane {
-            direction: None,
+        let cli_action = CliAction::NewPane(NewPaneArgs {
             command: vec!["ls".into()],
-            plugin: None,
-            cwd: None,
-            floating: false,
-            in_place: false,
-            close_replaced_pane: false,
-            pane_id: None,
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
-            stacked: false,
             blocking: true,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
             tab_id: Some(2),
-        };
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -4059,37 +3878,11 @@ mod tests {
 
     #[test]
     fn test_new_pane_plugin_tiled_with_tab_id() {
-        let cli_action = CliAction::NewPane {
-            direction: None,
-            command: vec![],
+        let cli_action = CliAction::NewPane(NewPaneArgs {
             plugin: Some("zellij:strider".into()),
-            cwd: None,
-            floating: false,
-            in_place: false,
-            close_replaced_pane: false,
-            pane_id: None,
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
-            stacked: false,
-            blocking: false,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
             tab_id: Some(2),
-        };
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();
@@ -4104,37 +3897,12 @@ mod tests {
 
     #[test]
     fn test_new_pane_plugin_floating_with_tab_id() {
-        let cli_action = CliAction::NewPane {
-            direction: None,
-            command: vec![],
+        let cli_action = CliAction::NewPane(NewPaneArgs {
             plugin: Some("zellij:strider".into()),
-            cwd: None,
             floating: true,
-            in_place: false,
-            close_replaced_pane: false,
-            pane_id: None,
-            name: None,
-            close_on_exit: false,
-            start_suspended: false,
-            restart: None,
-            configuration: None,
-            skip_plugin_cache: false,
-            x: None,
-            y: None,
-            width: None,
-            height: None,
-            pinned: None,
-            stacked: false,
-            blocking: false,
-            block_until_exit_success: false,
-            block_until_exit_failure: false,
-            block_until_exit: false,
-            unblock_condition: None,
-            near_current_pane: false,
-            no_focus: false,
-            borderless: None,
             tab_id: Some(1),
-        };
+            ..Default::default()
+        });
         let result = Action::actions_from_cli(cli_action, Box::new(|| PathBuf::from("/tmp")), None);
         assert!(result.is_ok());
         let actions = result.unwrap();

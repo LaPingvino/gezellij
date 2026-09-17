@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use zellij_client::os_input_output::SignalEvent;
 use zellij_client::ClientInfo;
-use zellij_utils::cli::{CliAction, CliArgs};
+use zellij_utils::cli::{CliAction, CliArgs, NewPaneArgs};
 use zellij_utils::data::{CommandOrPlugin, ConnectToSession, LayoutInfo};
 use zellij_utils::input::actions::{Action, RunCommandAction};
 use zellij_utils::input::options::Options;
@@ -291,37 +291,14 @@ fn new_pane_cli_action(
     start_suspended: bool,
     block_until_exit: bool,
 ) -> CliAction {
-    CliAction::NewPane {
-        direction: None,
+    CliAction::NewPane(NewPaneArgs {
         command: command.iter().map(|part| part.to_string()).collect(),
-        plugin: None,
-        cwd: None,
         floating,
-        in_place: false,
-        close_replaced_pane: false,
-        pane_id: None,
-        name: None,
         close_on_exit,
         start_suspended,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
         block_until_exit,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
-        borderless: None,
-        tab_id: None,
-    }
+        ..Default::default()
+    })
 }
 
 fn referenced_contents_files(layout: &str) -> impl Iterator<Item = &str> {

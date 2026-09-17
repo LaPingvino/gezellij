@@ -900,6 +900,135 @@ tail -f /tmp/my-live-logfile | zellij pipe --name logs --plugin https://example.
     },
 }
 
+#[derive(Args, Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NewPaneArgs {
+    /// Direction to open the new pane in
+    #[clap(short, long, value_parser, conflicts_with("floating"))]
+    pub direction: Option<Direction>,
+
+    #[clap(last(true))]
+    pub command: Vec<String>,
+
+    #[clap(short, long, conflicts_with("command"), conflicts_with("direction"))]
+    pub plugin: Option<String>,
+
+    /// Change the working directory of the new pane
+    #[clap(long, value_parser)]
+    pub cwd: Option<PathBuf>,
+
+    /// Open the new pane in floating mode
+    #[clap(short, long)]
+    pub floating: bool,
+
+    /// Open the new pane in place of the current pane, temporarily suspending it
+    #[clap(short, long, conflicts_with("floating"), conflicts_with("direction"))]
+    pub in_place: bool,
+
+    /// Close the replaced pane instead of suspending it (only effective with --in-place)
+    #[clap(long, requires("in_place"))]
+    pub close_replaced_pane: bool,
+
+    /// The pane to replace when opening in place, eg. terminal_1, plugin_2 or 3 (only
+    /// effective with --in-place; defaults to the focused pane)
+    #[clap(
+        long,
+        value_parser,
+        requires("in_place"),
+        conflicts_with("near_current_pane")
+    )]
+    pub pane_id: Option<String>,
+
+    /// Name of the new pane
+    #[clap(short, long, value_parser)]
+    pub name: Option<String>,
+
+    /// Close the pane immediately when its command exits
+    #[clap(short, long, requires("command"))]
+    pub close_on_exit: bool,
+    /// Start the command suspended, only running it after the you first press ENTER
+    #[clap(short, long, requires("command"))]
+    pub start_suspended: bool,
+    /// Gezellij: supervise the command - restart it when it exits (no, on-failure, always)
+    #[clap(long, value_enum, requires("command"))]
+    pub restart: Option<RestartPolicy>,
+    #[clap(long, value_parser)]
+    pub configuration: Option<PluginUserConfiguration>,
+    #[clap(long, value_parser)]
+    pub skip_plugin_cache: bool,
+    /// The x coordinates if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
+    #[clap(short, long, requires("floating"))]
+    pub x: Option<String>,
+    /// The y coordinates if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
+    #[clap(short, long, requires("floating"))]
+    pub y: Option<String>,
+    /// The width if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
+    #[clap(long, requires("floating"))]
+    pub width: Option<String>,
+    /// The height if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
+    #[clap(long, requires("floating"))]
+    pub height: Option<String>,
+    /// Whether to pin a floating pane so that it is always on top
+    #[clap(long, requires("floating"))]
+    pub pinned: Option<bool>,
+    #[clap(long, conflicts_with("floating"), conflicts_with("direction"))]
+    pub stacked: bool,
+    /// Block until the command has finished and its pane has been closed
+    #[clap(short, long)]
+    pub blocking: bool,
+
+    /// Block until the command exits successfully (exit status 0) OR its pane has been closed
+    #[clap(
+        long,
+        conflicts_with("blocking"),
+        conflicts_with("block_until_exit_failure"),
+        conflicts_with("block_until_exit")
+    )]
+    pub block_until_exit_success: bool,
+
+    /// Block until the command exits with failure (non-zero exit status) OR its pane has been
+    /// closed
+    #[clap(
+        long,
+        conflicts_with("blocking"),
+        conflicts_with("block_until_exit_success"),
+        conflicts_with("block_until_exit")
+    )]
+    pub block_until_exit_failure: bool,
+
+    /// Block until the command exits (regardless of exit status) OR its pane has been closed
+    #[clap(
+        long,
+        conflicts_with("blocking"),
+        conflicts_with("block_until_exit_success"),
+        conflicts_with("block_until_exit_failure")
+    )]
+    pub block_until_exit: bool,
+
+    #[clap(skip)]
+    pub unblock_condition: Option<UnblockCondition>,
+
+    /// if set, will open the pane near the current one rather than following the user's focus
+    #[clap(long)]
+    pub near_current_pane: bool,
+    #[clap(
+        long,
+        help = "if set, will open the pane without changing the focus of any client, placing it relative to the pane the command was issued from"
+    )]
+    pub no_focus: bool,
+    /// start this pane without a border (warning: will make it impossible to move with the
+    /// mouse)
+    #[clap(long, value_parser)]
+    pub borderless: Option<bool>,
+    /// Target a specific tab by ID
+    #[clap(
+        long,
+        value_parser,
+        conflicts_with("near_current_pane"),
+        conflicts_with("in_place")
+    )]
+    pub tab_id: Option<usize>,
+}
+
 #[derive(Debug, Subcommand, Clone, Serialize, Deserialize)]
 pub enum CliAction {
     /// Write bytes to the terminal.
@@ -1094,133 +1223,7 @@ pub enum CliAction {
     /// Open a new pane in the specified direction [right|down]
     /// If no direction is specified, will try to use the biggest available space.
     /// Returns: Created pane ID (format: terminal_<id> or plugin_<id>)
-    NewPane {
-        /// Direction to open the new pane in
-        #[clap(short, long, value_parser, conflicts_with("floating"))]
-        direction: Option<Direction>,
-
-        #[clap(last(true))]
-        command: Vec<String>,
-
-        #[clap(short, long, conflicts_with("command"), conflicts_with("direction"))]
-        plugin: Option<String>,
-
-        /// Change the working directory of the new pane
-        #[clap(long, value_parser)]
-        cwd: Option<PathBuf>,
-
-        /// Open the new pane in floating mode
-        #[clap(short, long)]
-        floating: bool,
-
-        /// Open the new pane in place of the current pane, temporarily suspending it
-        #[clap(short, long, conflicts_with("floating"), conflicts_with("direction"))]
-        in_place: bool,
-
-        /// Close the replaced pane instead of suspending it (only effective with --in-place)
-        #[clap(long, requires("in_place"))]
-        close_replaced_pane: bool,
-
-        /// The pane to replace when opening in place, eg. terminal_1, plugin_2 or 3 (only
-        /// effective with --in-place; defaults to the focused pane)
-        #[clap(
-            long,
-            value_parser,
-            requires("in_place"),
-            conflicts_with("near_current_pane")
-        )]
-        pane_id: Option<String>,
-
-        /// Name of the new pane
-        #[clap(short, long, value_parser)]
-        name: Option<String>,
-
-        /// Close the pane immediately when its command exits
-        #[clap(short, long, requires("command"))]
-        close_on_exit: bool,
-        /// Start the command suspended, only running it after the you first press ENTER
-        #[clap(short, long, requires("command"))]
-        start_suspended: bool,
-        /// Gezellij: supervise the command - restart it when it exits (no, on-failure, always)
-        #[clap(long, value_enum, requires("command"))]
-        restart: Option<RestartPolicy>,
-        #[clap(long, value_parser)]
-        configuration: Option<PluginUserConfiguration>,
-        #[clap(long, value_parser)]
-        skip_plugin_cache: bool,
-        /// The x coordinates if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
-        #[clap(short, long, requires("floating"))]
-        x: Option<String>,
-        /// The y coordinates if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
-        #[clap(short, long, requires("floating"))]
-        y: Option<String>,
-        /// The width if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
-        #[clap(long, requires("floating"))]
-        width: Option<String>,
-        /// The height if the pane is floating as a bare integer (eg. 1) or percent (eg. 10%)
-        #[clap(long, requires("floating"))]
-        height: Option<String>,
-        /// Whether to pin a floating pane so that it is always on top
-        #[clap(long, requires("floating"))]
-        pinned: Option<bool>,
-        #[clap(long, conflicts_with("floating"), conflicts_with("direction"))]
-        stacked: bool,
-        /// Block until the command has finished and its pane has been closed
-        #[clap(short, long)]
-        blocking: bool,
-
-        /// Block until the command exits successfully (exit status 0) OR its pane has been closed
-        #[clap(
-            long,
-            conflicts_with("blocking"),
-            conflicts_with("block_until_exit_failure"),
-            conflicts_with("block_until_exit")
-        )]
-        block_until_exit_success: bool,
-
-        /// Block until the command exits with failure (non-zero exit status) OR its pane has been
-        /// closed
-        #[clap(
-            long,
-            conflicts_with("blocking"),
-            conflicts_with("block_until_exit_success"),
-            conflicts_with("block_until_exit")
-        )]
-        block_until_exit_failure: bool,
-
-        /// Block until the command exits (regardless of exit status) OR its pane has been closed
-        #[clap(
-            long,
-            conflicts_with("blocking"),
-            conflicts_with("block_until_exit_success"),
-            conflicts_with("block_until_exit_failure")
-        )]
-        block_until_exit: bool,
-
-        #[clap(skip)]
-        unblock_condition: Option<UnblockCondition>,
-
-        /// if set, will open the pane near the current one rather than following the user's focus
-        #[clap(long)]
-        near_current_pane: bool,
-        #[clap(
-            long,
-            help = "if set, will open the pane without changing the focus of any client, placing it relative to the pane the command was issued from"
-        )]
-        no_focus: bool,
-        /// start this pane without a border (warning: will make it impossible to move with the
-        /// mouse)
-        #[clap(long, value_parser)]
-        borderless: Option<bool>,
-        /// Target a specific tab by ID
-        #[clap(
-            long,
-            value_parser,
-            conflicts_with("near_current_pane"),
-            conflicts_with("in_place")
-        )]
-        tab_id: Option<usize>,
-    },
+    NewPane(NewPaneArgs),
     /// Open the specified file in a new zellij pane with your default EDITOR
     /// Returns: Created pane ID (format: terminal_<id>)
     Edit {

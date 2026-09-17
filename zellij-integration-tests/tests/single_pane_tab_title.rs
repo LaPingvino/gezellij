@@ -4,44 +4,20 @@ use zellij_integration_tests::{
     claim_first_terminal_and_wait_for_prompt, split_right_and_wait_for_prompt, start_zellij,
     FakePtyHandle, TestSession,
 };
-use zellij_utils::cli::CliAction;
+use zellij_utils::cli::{CliAction, NewPaneArgs};
 
 fn replace_pane_in_place_with_held_command(
     zellij: &TestSession,
     pane_id: &str,
     command: &str,
 ) -> FakePtyHandle {
-    zellij.run_cli_action(CliAction::NewPane {
-        direction: None,
+    zellij.run_cli_action(CliAction::NewPane(NewPaneArgs {
         command: vec![command.to_string()],
-        plugin: None,
-        cwd: None,
-        floating: false,
         in_place: true,
         close_replaced_pane: true,
         pane_id: Some(pane_id.to_string()),
-        name: None,
-        close_on_exit: false,
-        start_suspended: false,
-        restart: None,
-        configuration: None,
-        skip_plugin_cache: false,
-        x: None,
-        y: None,
-        width: None,
-        height: None,
-        pinned: None,
-        stacked: false,
-        blocking: false,
-        block_until_exit_success: false,
-        block_until_exit_failure: false,
-        block_until_exit: false,
-        unblock_condition: None,
-        near_current_pane: false,
-        no_focus: false,
-        borderless: None,
-        tab_id: None,
-    });
+        ..Default::default()
+    }));
     zellij.expect_pty_spawn()
 }
 
