@@ -12,6 +12,17 @@ linker = "x86_64-w64-mingw32-gcc"
 [build]
 target-dir = "target"
 
+# Gezellij: link with mold. The zellij binary is ~220 MiB of debug info, and linking it is a
+# single-threaded, memory-hungry step that lands at the very end of every incremental build - the
+# part you actually wait for when you change one line. mold threads it.
+#
+# This is deliberately scoped to this repo's config rather than ~/.cargo/config.toml, so it cannot
+# surprise anything else built on this machine. If mold is ever missing the build fails with a
+# clear "linker `clang` not found" style error; `pacman -S mold clang` fixes it.
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=/usr/bin/mold"]
+
 # Gezellij: clap builds its `Command` tree recursively, and `CliAction` is by now large enough
 # that doing so in a debug build overflows the 2 MiB stack the test harness gives a test thread
 # (the real binary parses on the main thread, which has 8 MiB, and is unaffected). Adding a
