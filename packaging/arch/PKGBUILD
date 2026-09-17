@@ -85,9 +85,34 @@ pkgver() {
     fi
 }
 
+# Gezellij: a strictly hermetic build keeps CARGO_HOME and the target dir under $srcdir, which
+# makepkg wipes - so every build re-downloads and recompiles ~400 dependencies, about ten minutes
+# of pure repetition. This is a personal package rebuilt often, so by default both live in a
+# persistent cache and rebuilds are incremental. Set GEZELLIJ_HERMETIC=1 for the strict behaviour
+# (what you want for a package you hand to someone else, or to rule the cache out as a suspect).
+_gezellij_cache_root() {
+    printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/gezellij-build"
+}
+_gezellij_cargo_home() {
+    if [ -n "$GEZELLIJ_HERMETIC" ]; then
+        printf '%s' "$srcdir/cargo-home"
+    else
+        mkdir -p -- "$(_gezellij_cache_root)/cargo-home"
+        printf '%s' "$(_gezellij_cache_root)/cargo-home"
+    fi
+}
+_gezellij_target_dir() {
+    if [ -n "$GEZELLIJ_HERMETIC" ]; then
+        printf '%s' "$srcdir/target"
+    else
+        mkdir -p -- "$(_gezellij_cache_root)/target"
+        printf '%s' "$(_gezellij_cache_root)/target"
+    fi
+}
+
 prepare() {
     cd "$srcdir/gezellij"
-    export CARGO_HOME="$srcdir/cargo-home"
+    export CARGO_HOME="$(_gezellij_cargo_home)"
     # Same reason as in build(): rust-toolchain.toml pins 1.95.0 plus the
     # wasm32-wasip1/musl targets, and under `rustup` even `rustc -vV` and
     # `cargo fetch` would honour it and try to download a toolchain. Harmless
@@ -98,8 +123,17 @@ prepare() {
 
 build() {
     cd "$srcdir/gezellij"
-    export CARGO_HOME="$srcdir/cargo-home"
-    export CARGO_TARGET_DIR="$srcdir/target"
+    export CARGO_HOME="$(_gezellij_cargo_home)"
+    export CARGO_TARGET_DIR="$(_gezellij_target_dir)"
+    # Gezellij: this machine is a server - it is never idle, and a build that grabs every core
+    # makes everything else on it worse while not finishing any sooner (oversubscription just
+    # adds scheduling thrash). Leave two cores for whatever else is running; override with
+    # CARGO_BUILD_JOBS=N. Pair with `nice -n19 ionice -c3 makepkg` to yield rather than compete.
+    if [ -z "$CARGO_BUILD_JOBS" ]; then
+        _gz_cpus="$(nproc 2>/dev/null || echo 4)"
+        _gz_jobs=$(( _gz_cpus > 3 ? _gz_cpus - 2 : 1 ))
+        export CARGO_BUILD_JOBS="$_gz_jobs"
+    fi
     # rust-toolchain.toml pins channel 1.95.0 plus the wasm32-wasip1 and musl
     # targets. Under the `rustup` package that would make cargo try to download
     # a toolchain (makepkg builds must not hit the network); under the plain
@@ -120,7 +154,7 @@ build() {
 
 package() {
     cd "$srcdir/gezellij"
-    local bin="$srcdir/target/release/zellij"
+    local bin="$(_gezellij_target_dir)/release/zellij"
 
     install -Dm755 "$bin" "$pkgdir/usr/bin/gezellij"
 

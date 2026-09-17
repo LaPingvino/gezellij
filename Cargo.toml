@@ -131,9 +131,14 @@ inherits = "dev"
 opt-level = 3
 
 [profile.release]
-lto = true
+# Gezellij: upstream ships `lto = true` (fat) with `codegen-units = 1`, which optimises each
+# crate as a single unit with no parallelism - on an 8-core machine that is ~15 minutes sitting
+# on zellij-server alone at 100% of one core. Thin LTO with parallel codegen units builds several
+# times faster for a difference nobody can perceive in a terminal multiplexer. Revert these two
+# lines to `lto = true` / `codegen-units = 1` if you ever want the last drop of optimisation.
+lto = "thin"
 strip = true
-codegen-units = 1
+codegen-units = 16
 
 [package.metadata.deb]
 depends = "$auto"
